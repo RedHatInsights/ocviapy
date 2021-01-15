@@ -164,7 +164,9 @@ def _exec_oc(*args, **kwargs):
                 break
             elif _retry_conflicts and _conflicts_found(err_lines):
                 log.warning(
-                    "Hit resource conflict, retrying in 1 sec (attempt %d/%d)", count, retries,
+                    "Hit resource conflict, retrying in 1 sec (attempt %d/%d)",
+                    count,
+                    retries,
                 )
                 time.sleep(1)
                 continue
@@ -322,7 +324,10 @@ def _wait_with_periodic_status_check(namespace, timeout, key, restype, name):
         return False
 
     wait_for(
-        _ready, timeout=timeout, delay=5, message="wait for '{}' to be ready".format(key),
+        _ready,
+        timeout=timeout,
+        delay=5,
+        message="wait for '{}' to be ready".format(key),
     )
 
 
@@ -431,7 +436,15 @@ def copy_namespace_secrets(src_namespace, dst_namespace, secret_names):
             dst_namespace,
         )
         oc(
-            oc("get", "--export", "secret", secret_name, o="json", n=src_namespace, _silent=True,),
+            oc(
+                "get",
+                "--export",
+                "secret",
+                secret_name,
+                o="json",
+                n=src_namespace,
+                _silent=True,
+            ),
             "apply",
             f="-",
             n=dst_namespace,
@@ -488,6 +501,30 @@ def no_pods_running(namespace, label):
     return not any_pods_running(namespace, label)
 
 
+def _get_associated_pods_using_match_labels(namespace, restype, name):
+    data = get_json(restype, name, namespace=namespace)
+    if not data:
+        raise ValueError(f"resource {restype}/{name} not found")
+
+    match_labels = traverse_keys(data, ["spec", "selector", "matchLabels"])
+    if match_labels is None:
+        raise ValueError(f"resource {restype}/{name} has no 'matchLabels' selector specified")
+
+    label_str = ",".join([f"{key}={val}" for key, val in match_labels.items()])
+
+    return get_json("pod", label=label_str, namespace=namespace)
+
+
+def get_associated_pods(namespace, restype, name):
+    """
+    Get all pods associated with specified resource
+    """
+    restype = parse_restype(restype)
+    if restype == "deployment":
+        return _get_associated_pods_using_match_labels(namespace, restype, name)
+    raise ValueError(f"unsupported restype: {restype}")
+
+
 def _scale_down_up_using_match_labels(namespace, restype, name, timeout):
     data = get_json(restype, name, namespace=namespace)
     if not data:
@@ -508,7 +545,10 @@ def _scale_down_up_using_match_labels(namespace, restype, name, timeout):
     oc("scale", restype, name, namespace=namespace, replicas=0)
     wait_for(
         no_pods_running,
-        func_args=(namespace, label_str,),
+        func_args=(
+            namespace,
+            label_str,
+        ),
         message=f"wait for {restype}/{name} to have no pods running",
         timeout=timeout,
         delay=5,
@@ -520,6 +560,9 @@ def _scale_down_up_using_match_labels(namespace, restype, name, timeout):
 
 
 def scale_down_up(namespace, restype, name, timeout=300):
+    """
+    Scale specified resource down to 0 and back up to original replica count
+    """
     restype = parse_restype(restype)
     if restype == "deployment":
         return _scale_down_up_using_match_labels(namespace, restype, name, timeout)
