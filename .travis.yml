@@ -9,13 +9,12 @@ install:
 - pip install -r requirements-test.txt
 script:
 - flake8 --max-line-length 100 **/*.py
-#- pytest
 deploy:
   provider: pypi
   user: __token__
-  distributions: "sdist bdist_wheel"
+  distributions: sdist bdist_wheel
   skip_existing: true
   on:
     tags: true
   password:
-    secure: DW3z6aJv7FGcQThzPjgNwwppCuJ23RK4FJ7AhbCe3nSnrM+VlzDqmBwYG/gXQ7mV9UnANTPvYRg1O1YLO3NBPMseDG66CcLPE0uQb2uLCJMlOoOPAS9qzRW3JXQdzA2fZsljPVvHX1fr+7WXke3t9osxBOBhGNSxGE1/MnzS92skJ5ZQhBhdUk9tTn8V5HOPSIRVx+eE8n+bSuGuhQpIRtE6dk+iFqgveZFFOsALylzvpXL9f+Ryau+SahROTdZubr6hB/fVnNBU56NbvzHCRqm373gRYelOVkw8YkjW+uZaJw9/40mBXqsAdgOxuA+j+yKXnutNKYFhp+00km/6VWzkdQ2nSpKcdQpI3sFoGMR6CVqouVWVQKFqe/RlvDZMvwV0Ktm/9bPxPzT8KejHv9AKqdj2XoJXzta0+Zk33y/0jpCRdrwRWhNX2gllt4EpIAs7z7/fi1Ccwn70aZHLKfit8XaCWbbRzqYCJm8qB6/ggkimn5CWZ1LNVNBP8lgOY3dGKxZfVj4nvXCkDtVuq6u+nTHplbKUghSOcxlWOxb/i4z3SyP5Ypfe2zHN8YPlvuWEy+UvzQ6aC3/JMgDXfvJQXoFfesKHRpu6C6aORCmd8BziX+H0gJ6oK55wRmG0C505a+rMuHohQgQyDFnmyhbDQ/eZ1KWJSnSl+5Ro/rM=
+    secure: MfG5bquMgFy/QOdSYMjOjT+b8YVdIxf0SEzm+cUNl5CVNZKS+E8mJE6pUHKXubwDPkwq+wIGzIHqmuRo1JJEf0/GBHkGXomUQY/VbqCKwPwFMsBGMVtefAk9CXcN5Ry0UreXX/vehPGAcoKLzxK99FVnTpZX4thnFCL7Ll0IrwqXHz0Vl15O+4aVPqk4OXA152yYsQeyQP/y+oCJsFyUt/H1ZZvXVvkBEsAxWmvKIMliM1Xp+4swd23JI2CJKEXCs5Ckhe1vsG5gKFuK3jRx+lLoJBJLsZ4Zx2oi9FN5jE8mmY1VUKnJ6D+y+4dHOvBBP9jPFtQ/ky3f1qEcdBQ0ThTGmKvF+lAhEue551IJE74OlAeXLGv0nU675Kwxz06DY6SwIDk7y+Uj8iEUYmR0RgxZWC/py4KCXEssLy0UFgW++EN/0PbsDl4u1+z5Y6h9aswFSMv9BSTreI6cCz+kQNYuhJUs9wZiYI5OXPiOuX7CPbMnbHD8XeNUtXufMC5Xg9qrhWIm/eO82ev2pzzwBkH6CFqyRX9XQJLEZKvi0xLayqEVxtnTem2EgNkg7048eli9X+BRlg8LGrEs+ciVTy1084AJ76KvTjuQsUNh0s4+WYmL8mlfjdp/ADmwEYe/ngrTwJ2Lh636n0R5LOOdqoP0Fd4HoPAlLuCQG/fIfyo=
