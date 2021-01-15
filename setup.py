@@ -6,9 +6,7 @@ with open("README.md", "r") as fh:
 setup(
     name="ocviapy",
     use_scm_version=True,
-    description=(
-        "Wraps OpenShift shell utility (oc)"
-    ),
+    description=("Wraps OpenShift shell utility (oc)"),
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="MIT",

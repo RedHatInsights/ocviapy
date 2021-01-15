@@ -11,6 +11,8 @@ from wait_for import wait_for, TimedOutError
 
 
 log = logging.getLogger(__name__)
+logging.getLogger("sh").setLevel(logging.CRITICAL)
+
 
 # Resource types and their cli shortcuts
 # Mostly listed here: https://docs.openshift.com/online/cli_reference/basic_cli_operations.html
@@ -45,6 +47,19 @@ SHORTCUTS = {
     "clowdenvironment": None,
     "clowdapp": None,
 }
+
+
+def traverse_keys(d, keys, default=None):
+    """
+    Allows you to look up a 'path' of keys in nested dicts without knowing whether each key exists
+    """
+    key = keys.pop(0)
+    item = d.get(key, default)
+    if len(keys) == 0:
+        return item
+    if not item:
+        return default
+    return traverse_keys(item, keys, default)
 
 
 def parse_restype(string):
@@ -436,3 +451,76 @@ def process_template(template_data, params):
     )
     stdout, stderr = proc.communicate(json.dumps(template_data).encode("utf-8"))
     return json.loads(stdout.decode("utf-8"))
+
+
+def any_pods_running(namespace, label):
+    """
+    Return true if any pods are running associated with provided label
+    """
+    pod_data = get_json("pod", label=label, namespace=namespace)
+    if not pod_data or not len(pod_data.get("items", [])):
+        log.info("No pods found for label '%s'", label)
+        return False
+    for pod in pod_data["items"]:
+        if _check_status_for_restype("pod", pod):
+            return True
+    return False
+
+
+def all_pods_running(namespace, label):
+    """
+    Return true if all pods are running associated with provided label
+    """
+    pod_data = get_json("pod", label=label, namespace=namespace)
+    if not pod_data or not len(pod_data.get("items", [])):
+        log.info("No pods found for label '%s'", label)
+        return False
+    statuses = []
+    for pod in pod_data["items"]:
+        statuses.append(_check_status_for_restype("pod", pod))
+    return len(statuses) and all(statuses)
+
+
+def no_pods_running(namespace, label):
+    """
+    Return true if there are no pods running associated with provided label
+    """
+    return not any_pods_running(namespace, label)
+
+
+def _scale_down_up_using_match_labels(namespace, restype, name, timeout):
+    data = get_json(restype, name, namespace=namespace)
+    if not data:
+        raise ValueError(f"resource {restype}/{name} not found")
+
+    orig_replicas = traverse_keys(data, ["spec", "replicas"])
+    if orig_replicas is None:
+        raise ValueError(f"resource {restype}/{name} has no 'replicas' in 'spec'")
+    if orig_replicas == 0:
+        raise ValueError(f"resource {restype}/{name} has 'replicas' set to 0 in spec")
+
+    match_labels = traverse_keys(data, ["spec", "selector", "matchLabels"])
+    if match_labels is None:
+        raise ValueError(f"resource {restype}/{name} has no 'matchLabels' selector specified")
+
+    label_str = ",".join([f"{key}={val}" for key, val in match_labels.items()])
+
+    oc("scale", restype, name, namespace=namespace, replicas=0)
+    wait_for(
+        no_pods_running,
+        func_args=(namespace, label_str,),
+        message=f"wait for {restype}/{name} to have no pods running",
+        timeout=timeout,
+        delay=5,
+        log_on_loop=True,
+    )
+
+    oc("scale", restype, name, namespace=namespace, replicas=orig_replicas)
+    wait_for_ready(namespace, restype, name, timeout)
+
+
+def scale_down_up(namespace, restype, name, timeout=300):
+    restype = parse_restype(restype)
+    if restype == "deployment":
+        return _scale_down_up_using_match_labels(namespace, restype, name, timeout)
+    raise ValueError(f"unsupported restype for scaling down/up: {restype}")
