@@ -1,5 +1,0 @@
-PyYAML==5.3
-sh
-wait_for
-anytree
--e .
