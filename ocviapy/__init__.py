@@ -465,11 +465,14 @@ def copy_namespace_secrets(src_namespace, dst_namespace, secret_names):
             src_namespace,
             dst_namespace,
         )
+        secret_data = export("secret", secret_name, namespace=src_namespace)
+        if not secret_data:
+            raise ValueError(f"secret '{secret_name}' not found in namespace '{src_namespace}'")
         oc(
             "apply",
             f="-",
             n=dst_namespace,
-            _in=export("secret", secret_name, namespace=src_namespace),
+            _in=secret_data,
             _silent=True,
         )
 
