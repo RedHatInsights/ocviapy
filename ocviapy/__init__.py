@@ -242,6 +242,39 @@ def get_json(restype, name=None, label=None, namespace=None):
     return parsed_json
 
 
+def remove_cluster_specific_info(resource):
+    """Remove cluster-specific attributes from a resource."""
+    if "metadata" not in resource:
+        return resource
+
+    metadata = resource["metadata"]
+
+    last_applied_key = 'kubectl.kubernetes.io/last-applied-configuration'
+    last_applied = metadata.get('annotations', {}).get(last_applied_key)
+
+    if last_applied:
+        resource = json.loads(last_applied)
+    else:
+        for key in ["namespace", "resourceVersion", "uid", "selfLink"]:
+            if key in metadata:
+                del metadata[key]
+        metadata["creationTimestamp"] = None
+
+    if resource.get("kind", "").lower() == "list":
+        for item in resource.get('items', []):
+            remove_cluster_specific_info(item)
+
+    return resource
+
+
+def export(restype, name=None, label=None, namespace=None):
+    """Get data for resource but strip cluster-specific identifiers.
+
+    Replacement for oc --export
+    """
+    return remove_cluster_specific_info(get_json(restype, name, label, namespace))
+
+
 def get_routes(namespace):
     """
     Get all routes in the project.
