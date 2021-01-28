@@ -244,17 +244,14 @@ def get_json(restype, name=None, label=None, namespace=None):
 
 def remove_cluster_specific_info(resource):
     """Remove cluster-specific attributes from a resource."""
-    if "metadata" not in resource:
-        return resource
+    if "metadata" in resource:
+        metadata = resource["metadata"]
 
-    metadata = resource["metadata"]
+        last_applied_key = 'kubectl.kubernetes.io/last-applied-configuration'
+        last_applied = metadata.get('annotations', {}).get(last_applied_key)
 
-    last_applied_key = 'kubectl.kubernetes.io/last-applied-configuration'
-    last_applied = metadata.get('annotations', {}).get(last_applied_key)
-
-    if last_applied:
-        resource = json.loads(last_applied)
-    else:
+        if last_applied:
+            del metadata["annotations"][last_applied_key]
         for key in ["namespace", "resourceVersion", "uid", "selfLink"]:
             if key in metadata:
                 del metadata[key]
