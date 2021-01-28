@@ -247,8 +247,8 @@ def remove_cluster_specific_info(resource):
     if "metadata" in resource:
         metadata = resource["metadata"]
 
-        last_applied_key = 'kubectl.kubernetes.io/last-applied-configuration'
-        last_applied = metadata.get('annotations', {}).get(last_applied_key)
+        last_applied_key = "kubectl.kubernetes.io/last-applied-configuration"
+        last_applied = metadata.get("annotations", {}).get(last_applied_key)
 
         if last_applied:
             del metadata["annotations"][last_applied_key]
@@ -258,7 +258,7 @@ def remove_cluster_specific_info(resource):
         metadata["creationTimestamp"] = None
 
     if resource.get("kind", "").lower() == "list":
-        for item in resource.get('items', []):
+        for item in resource.get("items", []):
             remove_cluster_specific_info(item)
 
     return resource
@@ -466,18 +466,10 @@ def copy_namespace_secrets(src_namespace, dst_namespace, secret_names):
             dst_namespace,
         )
         oc(
-            oc(
-                "get",
-                "--export",
-                "secret",
-                secret_name,
-                o="json",
-                n=src_namespace,
-                _silent=True,
-            ),
             "apply",
             f="-",
             n=dst_namespace,
+            _in=export("secret", secret_name, namespace=src_namespace),
             _silent=True,
         )
 
