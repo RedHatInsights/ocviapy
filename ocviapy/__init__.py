@@ -1,16 +1,15 @@
+import functools
 import json
 import logging
+import re
+import shlex
+import sys
 import threading
 import time
-import re
-import sys
-import shlex
-import functools
 
 import sh
 from sh import ErrorReturnCode, TimeoutException
-from wait_for import wait_for, TimedOutError
-
+from wait_for import TimedOutError, wait_for
 
 log = logging.getLogger(__name__)
 logging.getLogger("sh").setLevel(logging.CRITICAL)
@@ -517,18 +516,14 @@ class Resource:
             status_conditions.append(txt)
         return status_conditions
 
-
-def _get_details(resources):
-    details = []
-    for r in resources:
-        if not r.ready:
-            detail_msg = f"\n  * {r.key} not ready"
-            if r.status_conditions:
-                detail_msg += ", status conditions:\n{}".format(
-                    "\n".join([f"    - {s}" for s in r.status_conditions])
-                )
-            details.append(detail_msg)
-    return details
+    @property
+    def details_str(self):
+        detail_msg = f"{self.key} {'not' if not self.ready else ''} ready"
+        if self.status_conditions:
+            detail_msg += ", status conditions:\n{}".format(
+                "\n".join([f"  - {s}" for s in self.status_conditions])
+            )
+        return detail_msg
 
 
 class ResourceWatcher(threading.Thread):
@@ -692,7 +687,9 @@ class ResourceWaiter:
                 self.timed_out = True
                 # log a "bulleted list" of the not ready resources and their status conditions
                 msg = f"[{self.key}] timed out waiting for resource to be ready"
-                details = _get_details([r for _, r in self.observed_resources.items()])
+                details = [
+                    f"  {r.details_str}" for _, r in self.observed_resources.items() if not r.ready
+                ]
                 if details:
                     msg += ", details: {}\n".format("\n".join(details))
                 log.error(msg)
