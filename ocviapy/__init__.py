@@ -1,52 +1,54 @@
+import functools
 import json
 import logging
+import re
+import shlex
+import sys
 import threading
 import time
 
 import sh
 from sh import ErrorReturnCode, TimeoutException
-from subprocess import PIPE
-from subprocess import Popen
-from wait_for import wait_for, TimedOutError
-
+from wait_for import TimedOutError, wait_for
 
 log = logging.getLogger(__name__)
 logging.getLogger("sh").setLevel(logging.CRITICAL)
 
 
-# Resource types and their cli shortcuts
-# Mostly listed here: https://docs.openshift.com/online/cli_reference/basic_cli_operations.html
-# TODO: query api to get the list of all known resource types on the cluster dynamically
-SHORTCUTS = {
-    "build": None,
-    "buildconfig": "bc",
-    "daemonset": "ds",
-    "deployment": "deploy",
-    "deploymentconfig": "dc",
-    "event": "ev",
-    "imagestream": "is",
-    "imagestreamtag": "istag",
-    "imagestreamimage": "isimage",
-    "job": None,
-    "limitrange": "limits",
-    "namespace": "ns",
-    "node": "no",
-    "pod": "po",
-    "project": "project",
-    "resourcequota": "quota",
-    "replicationcontroller": "rc",
-    "secrets": "secret",
-    "service": "svc",
-    "serviceaccount": "sa",
-    "statefulset": "sts",
-    "persistentvolume": "pv",
-    "persistentvolumeclaim": "pvc",
-    "configmap": "cm",
-    "replicaset": "rs",
-    "route": None,
-    "clowdenvironment": None,
-    "clowdapp": None,
-}
+# assume that the result of this will not change during execution of our app
+@functools.lru_cache(maxsize=None, typed=False)
+def get_api_resources():
+    output = oc("api-resources", verbs="list", _silent=True).strip()
+    if not output:
+        log.info("oc api-resources came back empty")
+        return []
+
+    lines = output.split("\n")
+    # lines[0] is the table header, use it to figure out length of each column
+    groups = re.findall(r"(\w+\s+)", lines[0])
+
+    name_start = 0
+    name_end = len(groups[0])
+    shortnames_start = name_end
+    shortnames_end = name_end + len(groups[1])
+    apigroup_start = shortnames_end
+    apigroup_end = shortnames_end + len(groups[2])
+    namespaced_start = apigroup_end
+    namespaced_end = apigroup_end + len(groups[3])
+    kind_start = namespaced_end
+
+    resources = []
+    for line in lines[1:]:
+        shortnames = line[shortnames_start:shortnames_end].strip()
+        resource = {
+            "name": line[name_start:name_end].strip().rstrip("s") or None,
+            "shortnames": shortnames.split(",") if shortnames else [],
+            "apigroup": line[apigroup_start:apigroup_end].strip() or "",
+            "namespaced": line[namespaced_start:namespaced_end].strip() == "true",
+            "kind": line[kind_start:].strip() or None,
+        }
+        resources.append(resource)
+    return resources
 
 
 def traverse_keys(d, keys, default=None):
@@ -66,13 +68,10 @@ def parse_restype(string):
     """
     Given a resource type or its shortcut, return the full resource type name.
     """
-    string_lower = string.lower()
-    if string_lower in SHORTCUTS:
-        return string_lower
-
-    for resource_name, shortcut in SHORTCUTS.items():
-        if string_lower == shortcut:
-            return resource_name
+    s = string.lower()
+    for r in get_api_resources():
+        if s in r["shortnames"] or s == r["name"]:
+            return r["name"]
 
     raise ValueError("Unknown resource type: {}".format(string))
 
@@ -83,6 +82,10 @@ def _only_immutable_errors(err_lines):
 
 def _conflicts_found(err_lines):
     return any("error from server (conflict)" in line.lower() for line in err_lines)
+
+
+def _io_error_found(err_lines):
+    return any("i/o timeout" in line.lower() for line in err_lines)
 
 
 def _get_logging_args(args, kwargs):
@@ -103,32 +106,40 @@ def _get_logging_args(args, kwargs):
 
 
 def _exec_oc(*args, **kwargs):
+    _print = kwargs.pop("_print", False)
     _silent = kwargs.pop("_silent", False)
-    _hide_output = kwargs.pop("_hide_output", False)
     _ignore_immutable = kwargs.pop("_ignore_immutable", True)
     _retry_conflicts = kwargs.pop("_retry_conflicts", True)
+    _retry_io_errors = kwargs.pop("_retry_io_errors", True)
     _stdout_log_prefix = kwargs.pop("_stdout_log_prefix", " |stdout| ")
     _stderr_log_prefix = kwargs.pop("_stderr_log_prefix", " |stderr| ")
-
     kwargs["_bg"] = True
     kwargs["_bg_exc"] = False
 
+    # define stdout/stderr callback funcs
     err_lines = []
     out_lines = []
 
     def _err_line_handler(line, _, process):
         threading.current_thread().name = f"pid-{process.pid}"
-        log.info("%s%s", _stderr_log_prefix, line.rstrip())
+        if _print:
+            print(line.rstrip(), file=sys.stderr)
+        if not _silent:
+            log.info("%s%s", _stderr_log_prefix, line.rstrip())
         err_lines.append(line)
 
     def _out_line_handler(line, _, process):
         threading.current_thread().name = f"pid-{process.pid}"
-        if not _silent and not _hide_output:
+        if _print:
+            print(line.rstrip())
+        if not _silent:
             log.info("%s%s", _stdout_log_prefix, line.rstrip())
         out_lines.append(line)
 
     retries = 3
+    backoff = 3
     last_err = None
+
     for count in range(1, retries + 1):
         cmd = sh.oc(*args, **kwargs, _tee=True, _out=_out_line_handler, _err=_err_line_handler)
         if not _silent:
@@ -163,12 +174,24 @@ def _exec_oc(*args, **kwargs):
                 log.warning("Ignoring immutable field errors")
                 break
             elif _retry_conflicts and _conflicts_found(err_lines):
+                sleep_time = count * backoff
                 log.warning(
-                    "Hit resource conflict, retrying in 1 sec (attempt %d/%d)",
+                    "Hit resource conflict, retrying in %d sec (attempt %d/%d)",
+                    sleep_time,
                     count,
                     retries,
                 )
-                time.sleep(1)
+                time.sleep(sleep_time)
+                continue
+            elif _retry_io_errors and _io_error_found(err_lines):
+                sleep_time = count * backoff
+                log.warning(
+                    "Hit i/o error, retrying in %d sec (attempt %d/%d)",
+                    sleep_time,
+                    count,
+                    retries,
+                )
+                time.sleep(sleep_time)
                 continue
 
             # Bail if not
@@ -181,19 +204,23 @@ def _exec_oc(*args, **kwargs):
 def oc(*args, **kwargs):
     """
     Run 'sh.oc' and print the command, show output, catch errors, etc.
+
     Optional kwargs:
         _ignore_errors: if ErrorReturnCode is hit, don't re-raise it (default False)
-        _silent: don't print command or resulting stdout (default False)
+        _silent: don't log command or resulting output (default False)
+        _print: print stdout/stderr output directly to stdout/stderr (default False)
         _ignore_immutable: ignore errors related to immutable objects (default True)
         _retry_conflicts: retry commands if a conflict error is hit
+        _retry_io_errors: retry commands if i/o error is hit
         _stdout_log_prefix: prefix this string to stdout log output (default " |stdout| ")
         _stderr_log_prefix: prefix this string to stderr log output (default " |stderr| ")
+
     Returns:
         None if cmd fails and _exit_on_err is False
         command output (str) if command succeeds
     """
     _ignore_errors = kwargs.pop("_ignore_errors", False)
-    # The _silent/_ignore_immutable/_retry_conflicts kwargs are passed on so don't pop them yet
+    # The _silent/_ignore_immutable/_retry_* kwargs are passed on so don't pop them yet
 
     try:
         return _exec_oc(*args, **kwargs)
@@ -207,15 +234,20 @@ def oc(*args, **kwargs):
 
 def apply_config(namespace, list_resource):
     """
-    Apply a k8s List of items to a namespace
+    Apply a k8s List of items
     """
-    oc("apply", "-f", "-", "-n", namespace, _in=json.dumps(list_resource))
+    if namespace is None:
+        oc("apply", "-f", "-", _in=json.dumps(list_resource))
+    else:
+        oc("apply", "-f", "-", "-n", namespace, _in=json.dumps(list_resource))
 
 
 def get_json(restype, name=None, label=None, namespace=None):
     """
     Run 'oc get' for a given resource type/name/label and return the json output.
+
     If name is None all resources of this type are returned
+
     If label is not provided, then "oc get" will not be filtered on label
     """
     restype = parse_restype(restype)
@@ -275,6 +307,7 @@ def export(restype, name=None, label=None, namespace=None):
 def get_routes(namespace):
     """
     Get all routes in the project.
+
     Return dict with key of service name, value of http route
     """
     data = get_json("route", namespace=namespace)
@@ -288,13 +321,65 @@ class StatusError(Exception):
     pass
 
 
-_CHECKABLE_RESOURCES = ["deploymentconfig", "deployment", "statefulset", "daemonset"]
+# resources we are able to parse the status of
+_CHECKABLE_RESOURCES = [
+    "deploymentconfig",
+    "deployment",
+    "statefulset",
+    "daemonset",
+    "clowdapp",
+    "clowdenvironment",
+    "clowdjobinvocation",
+    "kafka",
+    "kafkaconnect",
+    "pod",
+    "cyndipipeline",
+    "xjoinpipeline",
+]
+
+
+def _is_checkable(kind):
+    return kind.lower() in _CHECKABLE_RESOURCES
+
+
+def available_checkable_resources(namespaced=False):
+    """Returns resources we are able to parse status of that are present on the cluster."""
+    if namespaced:
+        return [
+            r["kind"].lower()
+            for r in get_api_resources()
+            if _is_checkable(r["kind"]) and r["namespaced"]
+        ]
+
+    return [r["kind"].lower() for r in get_api_resources() if _is_checkable(r["kind"])]
+
+
+def _get_name_for_kind(kind):
+    for r in get_api_resources():
+        if r["kind"].lower() == kind.lower():
+            return r["name"]
+    raise ValueError(f"unable to find resource name for kind '{kind}'")
+
+
+def _check_status_condition(status, expected_type, expected_value):
+    conditions = status.get("conditions", [])
+    expected_type = str(expected_type).lower()
+    expected_value = str(expected_value).lower()
+
+    for c in conditions:
+        status_value = str(c.get("status")).lower()
+        status_type = str(c.get("type")).lower()
+        if status_value == expected_value and status_type == expected_type:
+            return True
+    return False
 
 
 def _check_status_for_restype(restype, json_data):
     """
     Depending on the resource type, check that it is "ready" or "complete"
+
     Uses the status json from an 'oc get'
+
     Returns True if ready, False if not.
     """
     restype = parse_restype(restype)
@@ -310,14 +395,17 @@ def _check_status_for_restype(restype, json_data):
     if not status:
         return False
 
+    generation = json_data["metadata"].get("generation")
+    status_generation = status.get("observedGeneration") or status.get("generation")
+    if generation and status_generation and generation != status_generation:
+        return False
+
     if restype == "deploymentconfig" or restype == "deployment":
         spec_replicas = json_data["spec"]["replicas"]
         available_replicas = status.get("availableReplicas", 0)
         updated_replicas = status.get("updatedReplicas", 0)
-        unavailable_replicas = status.get("unavailableReplicas", 1)
-        if unavailable_replicas == 0:
-            if available_replicas == spec_replicas and updated_replicas == spec_replicas:
-                return True
+        if available_replicas == spec_replicas and updated_replicas == spec_replicas:
+            return True
 
     elif restype == "statefulset":
         spec_replicas = json_data["spec"]["replicas"]
@@ -333,162 +421,367 @@ def _check_status_for_restype(restype, json_data):
         if status.get("phase").lower() == "running":
             return True
 
+    elif restype in ("clowdenvironment", "clowdapp"):
+        return _check_status_condition(
+            status, "DeploymentsReady", "true"
+        ) and _check_status_condition(status, "ReconciliationSuccessful", "true")
 
-def _wait_with_periodic_status_check(namespace, timeout, key, restype, name):
-    """Check if resource is ready using _check_status_for_restype, periodically log an update."""
-    time_last_logged = time.time()
-    time_remaining = timeout
+    elif restype == "clowdjobinvocation":
+        return _check_status_condition(
+            status, "JobInvocationComplete", "true"
+        ) and _check_status_condition(status, "ReconciliationSuccessful", "true")
 
-    def _ready():
-        nonlocal time_last_logged, time_remaining
+    elif restype in ("kafka", "kafkaconnect"):
+        return _check_status_condition(status, "ready", "true")
 
-        j = get_json(restype, name, namespace=namespace)
-        if _check_status_for_restype(restype, j):
-            return True
+    elif restype == "cyndipipeline":
+        return (
+            _check_status_condition(status, "valid", "true")
+            and status.get("activeTableName") is not None
+        )
 
-        if time.time() > time_last_logged + 60:
-            time_remaining -= 60
-            if time_remaining:
-                log.info("[%s] waiting %dsec longer", key, time_remaining)
-                time_last_logged = time.time()
+    elif restype == "xjoinpipeline":
+        return (
+            _check_status_condition(status, "valid", "true")
+            and status.get("activeIndexName") is not None
+        )
+
+
+class Resource:
+    def __init__(self, restype=None, name=None, namespace=None, data=None):
+        if not data and not (restype and name):
+            raise ValueError("Resource must be instantiated with restype/name or data")
+
+        self._restype = restype
+        self._name = name
+        self._namespace = namespace
+        self._data = data
+
+    def get_json(self):
+        self._data = get_json(self._restype, name=self._name, namespace=self._namespace)
+        return self._data
+
+    @property
+    def data(self):
+        if not self._data:
+            self.get_json()
+        return self._data
+
+    @property
+    def kind(self):
+        return self.data["kind"].lower()
+
+    @property
+    def restype(self):
+        return _get_name_for_kind(self.kind)
+
+    @property
+    def name(self):
+        return self.data["metadata"]["name"]
+
+    @property
+    def namespace(self):
+        return self.data["metadata"]["namespace"]
+
+    @property
+    def key(self):
+        if self._restype and self._name:
+            return f"{self._restype}/{self._name}"
+        else:
+            return f"{self.restype}/{self.name}"
+
+    @property
+    def uid(self):
+        return self.data["metadata"]["uid"]
+
+    @property
+    def ready(self):
+        return _check_status_for_restype(self.restype, self.data)
+
+    @property
+    def status_conditions(self):
+        status_conditions = []
+        conditions = self.data.get("status", {}).get("conditions", [])
+        for c in conditions:
+            status_value = c.get("status")
+            status_type = c.get("type")
+            txt = f"{status_type}: {status_value}"
+
+            status_msg = c.get("message")
+            status_reason = c.get("reason")
+            msg = status_msg or status_reason
+            if msg:
+                txt += f" ({msg})"
+
+            status_conditions.append(txt)
+        return status_conditions
+
+    @property
+    def details_str(self):
+        detail_msg = f"{self.key} {'not' if not self.ready else ''} ready"
+        if self.status_conditions:
+            detail_msg += ", status conditions:\n{}".format(
+                "\n".join([f"  - {s}" for s in self.status_conditions])
+            )
+        return detail_msg
+
+
+class ResourceWatcher(threading.Thread):
+    def __init__(self, namespace, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.daemon = True
+        self.namespace = namespace
+        self.resources = {}
+        self._stopped = threading.Event()
+
+    def run(self):
+        log.debug("starting resource watcher for namespace '%s'", self.namespace)
+        while not self._stopped.is_set():
+            found_keys = []
+            for restype in available_checkable_resources():
+                response = get_json(restype, namespace=self.namespace)
+                for item in response.get("items", []):
+                    r = Resource(data=item)
+                    self.resources[r.key] = r
+                    found_keys.append(r.key)
+            for key in list(self.resources.keys()):
+                if key not in found_keys:
+                    del self.resources[key]
+            time.sleep(5)
+        log.debug("resource watcher stopped for namespace '%s'", self.namespace)
+
+    def stop(self):
+        self._stopped.set()
+
+
+class ResourceWaiter:
+    def __init__(self, namespace, restype, name, watch_owned=False, watcher=None):
+        self.namespace = namespace
+        self.restype = parse_restype(restype)
+        self.name = name.lower()
+        self.watch_owned = watch_owned
+        self.watcher = watcher
+        self.observed_resources = dict()
+        self.key = f"{self.restype}/{self.name}"
+        self.resource = None
+        self.timed_out = False
+        self._time_last_logged = None
+        self._time_remaining = None
+
+        if self.watch_owned and not self.watcher:
+            raise ValueError("watcher must be specified if using watch_owned=True")
+
+        if self.restype not in available_checkable_resources():
+            raise ValueError(
+                f"unable to check status of '{self.restype}' resources on this cluster"
+            )
+
+    def _check_owned_resources(self, resource):
+        for owner_ref in resource.data["metadata"].get("ownerReferences", []):
+            restype_matches = owner_ref["kind"].lower() == self.restype
+            owner_uid_matches = owner_ref["uid"] == self.resource.uid
+            if restype_matches and owner_uid_matches:
+                # this resource is owned by "self"
+                previously_observed = False
+                previously_ready = False
+                if resource.key in self.observed_resources:
+                    # so we don't keep logging on every loop
+                    previously_observed = True
+                    previous_resource = self.observed_resources[resource.key]
+                    previously_ready = True if previous_resource.ready else False
+
+                # update our records for this resource
+                self.observed_resources[resource.key] = resource
+
+                if not previously_observed and not resource.ready:
+                    log.info(
+                        "[%s] found owned resource %s, not yet ready",
+                        self.key,
+                        resource.key,
+                    )
+
+                # check if ready state has transitioned for this resource
+                if not previously_ready and resource.ready:
+                    log.info("[%s] owned resource %s is ready!", self.key, resource.key)
+
+    def _observe(self, resource):
+        key = resource.key
+
+        previously_ready = False
+        if key in self.observed_resources:
+            previous_resource = self.observed_resources[key]
+            if previous_resource.ready:
+                # so we don't keep logging on every loop
+                previously_ready = True
+
+        # update our records for this resource
+        self.observed_resources[key] = resource
+
+        if self.watch_owned:
+            for _, r in self.watcher.resources.items():
+                self._check_owned_resources(r)
+
+            # check to see if any of the owned resources we were previously watching are now no
+            # longer present in the ResourceWatcher
+            disappeared_resources = {
+                key for key in self.observed_resources if key not in self.watcher.resources
+            }
+            for key in disappeared_resources:
+                log.info("[%s] resource has disappeared, no longer monitoring it", key)
+                del self.observed_resources[key]
+
+        if not previously_ready and resource.ready:
+            log.info("[%s] resource is ready!", key)
+
+    def check_ready(self):
+        if self.watcher:
+            self.resource = self.watcher.resources.get(self.key)
+            data = self.resource.data if self.resource else None
+        else:
+            self.resource = Resource(self.restype, self.name, self.namespace)
+            data = self.resource.get_json()
+
+        if data:
+            self._observe(self.resource)
+            return all([r.ready is True for _, r in self.observed_resources.items()])
         return False
 
-    wait_for(
-        _ready,
-        timeout=timeout,
-        delay=5,
-        message="wait for '{}' to be ready".format(key),
-    )
+    def _check_with_periodic_log(self):
+        if self.check_ready():
+            return True
+
+        if time.time() > self._time_last_logged + 60:
+            self._time_remaining -= 60
+            if self._time_remaining:
+                log.info("[%s] waiting %dsec longer", self.key, self._time_remaining)
+                self._time_last_logged = time.time()
+        return False
+
+    def wait_for_ready(self, timeout, reraise=False):
+        self.timed_out = False
+        self._time_last_logged = time.time()
+        self._time_remaining = timeout
+
+        # we can loop with a much smaller delay if using a ResourceWatcher thread
+        delay = 0.1 if self.watcher else 5
+
+        try:
+            # check for ready initially, only wait_for if we need to
+            log.debug("[%s] checking if 'ready'", self.key)
+            if not self.check_ready():
+                log.info("[%s] waiting up to %dsec for resource to be 'ready'", self.key, timeout)
+                wait_for(
+                    self._check_with_periodic_log,
+                    message=f"wait for {self.key} to be 'ready'",
+                    delay=delay,
+                    timeout=timeout,
+                )
+            return True
+        except (StatusError, ErrorReturnCode) as err:
+            log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
+            if reraise:
+                raise
+        except (TimeoutException, TimedOutError):
+            # check one last time and error out if its still not ready
+            if not self.check_ready():
+                self.timed_out = True
+                # log a "bulleted list" of the not ready resources and their status conditions
+                msg = f"[{self.key}] timed out waiting for resource to be ready"
+                details = [
+                    f"  {r.details_str}" for _, r in self.observed_resources.items() if not r.ready
+                ]
+                if details:
+                    msg += ", details: {}\n".format("\n".join(details))
+                log.error(msg)
+
+            if reraise:
+                raise
+        return False
 
 
-def wait_for_ready(namespace, restype, name, timeout=300, _result_dict=None):
-    """
-    Wait {timeout} for resource to be complete/ready/active.
-    Args:
-        restype: type of resource, which can be "build", "dc", "deploymentconfig"
-        name: name of resource
-        timeout: time in secs to wait for resource to become ready
-    Returns:
-        True if ready,
-        False if timed out
-    '_result_dict' can be passed when running this in a threaded fashion
-    to store the result of this wait as:
-        _result_dict[resource_name] = True or False
-    """
-    restype = parse_restype(restype)
-    key = "{}/{}".format(SHORTCUTS.get(restype) or restype, name)
-
-    if _result_dict is None:
-        _result_dict = dict()
-    _result_dict[key] = False
-
-    log.info("[%s] waiting up to %dsec for resource to be ready", key, timeout)
-
-    try:
-        # Do not use rollout status for statefulset/daemonset yet until we can handle
-        # https://github.com/kubernetes/kubernetes/issues/64500
-        if restype in ["deployment", "deploymentconfig"]:
-            # use oc rollout status for the applicable resource types
-            oc(
-                "rollout",
-                "status",
-                key,
-                namespace=namespace,
-                _timeout=timeout,
-                _stdout_log_prefix=f"[{key}] ",
-                _stderr_log_prefix=f"[{key}]  ",
-            )
-        else:
-            _wait_with_periodic_status_check(namespace, timeout, key, restype, name)
-
-        log.info("[%s] is ready!", key)
-        _result_dict[key] = True
-        return True
-    except (StatusError, ErrorReturnCode) as err:
-        log.error("[%s] hit error waiting for resource to be ready: %s", key, str(err))
-    except (TimeoutException, TimedOutError):
-        log.error("[%s] timed out waiting for resource to be ready", key)
-    return False
+def wait_for_ready(namespace, restype, name, timeout=600):
+    waiter = ResourceWaiter(namespace, restype, name)
+    return waiter.wait_for_ready(timeout)
 
 
-def wait_for_ready_threaded(namespace, restype_name_list, timeout=300):
-    """
-    Wait for multiple delpoyments in a threaded fashion.
-    Args:
-        restype_name_list: list of tuples with (resource_type, resource_name,)
-        timeout: timeout for each thread
-    Returns:
-        True if all deployments are ready
-        False if any failed
-    """
-    result_dict = dict()
+def wait_for_ready_threaded(waiters, timeout=600):
     threads = [
-        threading.Thread(
-            target=wait_for_ready, args=(namespace, restype, name, timeout, result_dict)
-        )
-        for restype, name in restype_name_list
+        threading.Thread(target=waiter.wait_for_ready, daemon=True, args=(timeout,))
+        for waiter in waiters
     ]
     for thread in threads:
-        thread.daemon = True
-        thread.name = thread.name.lower()  # because I'm picky
+        thread.name = thread.name.lower()
         thread.start()
     for thread in threads:
         thread.join()
 
-    failed = [key for key, result in result_dict.items() if not result]
+    timed_out_resources = [w.key for w in waiters if w.timed_out]
 
-    if failed:
-        log.info("Some resources failed to become ready: %s", ", ".join(failed))
+    if timed_out_resources:
+        log.info("some resources failed to become ready: %s", ", ".join(timed_out_resources))
         return False
+
+    log.info("all resources being monitored reached 'ready' state")
     return True
 
 
-def _wait_for_resources(namespace, timeout, skip=None):
-    skip = skip or []
-    wait_for_list = []
-    for restype in _CHECKABLE_RESOURCES:
-        resources = get_json(restype, namespace=namespace)
-        for item in resources["items"]:
-            entry = (restype, item["metadata"]["name"])
-            if entry not in skip:
-                wait_for_list.append((restype, item["metadata"]["name"]))
-
-    result = wait_for_ready_threaded(namespace, wait_for_list, timeout=timeout)
-    return result, wait_for_list
-
-
-def copy_namespace_secrets(src_namespace, dst_namespace, secret_names):
+def copy_namespace_secrets(src_namespace, dst_namespace, secret_names, ignore_annotation_key):
     for secret_name in secret_names:
+        secret_data = export("secret", secret_name, namespace=src_namespace)
+        ignore = secret_data["metadata"].get("annotations", {}).get(ignore_annotation_key)
+        if str(ignore).lower() == "true":
+            log.debug(
+                "secret '%s' in namespace '%s' has bonfire.ignore==true, skipping",
+                secret_name,
+                src_namespace,
+            )
+            continue
+
         log.info(
             "copying secret '%s' from namespace '%s' to namespace '%s'",
             secret_name,
             src_namespace,
             dst_namespace,
         )
-        secret_data = export("secret", secret_name, namespace=src_namespace)
-        if not secret_data:
-            raise ValueError(f"secret '{secret_name}' not found in namespace '{src_namespace}'")
         oc(
             "apply",
             f="-",
             n=dst_namespace,
-            _in=secret_data,
+            _in=json.dumps(secret_data),
             _silent=True,
         )
 
 
-def process_template(template_data, params):
+def process_template(template_data, params, local=True):
     valid_pnames = set(p["name"] for p in template_data.get("parameters", []))
     param_str = " ".join(f"-p {k}='{v}'" for k, v in params.items() if k in valid_pnames)
+    local_str = str(local).lower()
 
-    proc = Popen(
-        f"oc process --local --ignore-unknown-parameters -o json -f - {param_str}",
-        shell=True,
-        stdin=PIPE,
-        stdout=PIPE,
-    )
-    stdout, stderr = proc.communicate(json.dumps(template_data).encode("utf-8"))
-    return json.loads(stdout.decode("utf-8"))
+    args = f"process --local={local_str} --ignore-unknown-parameters -o json -f - {param_str}"
+
+    output = oc(shlex.split(args), _silent=True, _in=json.dumps(template_data))
+
+    return json.loads(str(output))
+
+
+# assume that the result of this will not change during execution of a single 'bonfire' command
+@functools.lru_cache(maxsize=None, typed=False)
+def on_k8s():
+    """Detect whether this is a k8s or openshift cluster based on existence of projects."""
+    project_resource = [r for r in get_api_resources() if r["name"] == "project"]
+
+    if project_resource:
+        return False
+    return True
+
+
+def get_all_namespaces():
+    if not on_k8s():
+        all_namespaces = get_json("project")["items"]
+    else:
+        all_namespaces = get_json("namespace")["items"]
+
+    return all_namespaces
 
 
 def any_pods_running(namespace, label):
