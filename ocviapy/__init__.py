@@ -798,11 +798,11 @@ def on_k8s():
     return True
 
 
-def get_all_namespaces():
+def get_all_namespaces(label=None):
     if not on_k8s():
-        all_namespaces = get_json("project")["items"]
+        all_namespaces = get_json("project", label=label)["items"]
     else:
-        all_namespaces = get_json("namespace")["items"]
+        all_namespaces = get_json("namespace", label=label)["items"]
 
     return all_namespaces
 
