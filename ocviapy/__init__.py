@@ -321,21 +321,28 @@ class StatusError(Exception):
     pass
 
 
-# resources we are able to parse the status of
-_CHECKABLE_RESOURCES = [
+# Resources we are able to parse the status of
+#
+# In order for the 'ResourceWatcher' to collect resource info for underlying "owned" resources
+# correct, these types should be ordered according to where they fall on the "ownership chain."
+# For example, 'deployments' own 'replicasets' which own 'pods' -- so we want to list the resource
+# types from "lowest" to "highest" on the hierarchy here -- pod, replicaset, deployment
+_CHECKABLE_RESOURCES = (
+    "pod",
+    "replicaset",
+    "replicationcontroller",
     "deploymentconfig",
     "deployment",
     "statefulset",
     "daemonset",
     "clowdapp",
-    "clowdenvironment",
     "clowdjobinvocation",
+    "clowdenvironment",
     "kafka",
     "kafkaconnect",
-    "pod",
     "cyndipipeline",
     "xjoinpipeline",
-]
+)
 
 
 def _is_checkable(kind):
@@ -344,14 +351,16 @@ def _is_checkable(kind):
 
 def available_checkable_resources(namespaced=False):
     """Returns resources we are able to parse status of that are present on the cluster."""
-    if namespaced:
-        return [
-            r["kind"].lower()
-            for r in get_api_resources()
-            if _is_checkable(r["kind"]) and r["namespaced"]
-        ]
+    checkable_resources = []
+    api_resources = get_api_resources()
+    for checkable_kind in _CHECKABLE_RESOURCES:
+        for api_resource in api_resources:
+            kind = api_resource["kind"].lower()
+            if kind == checkable_kind:
+                if not namespaced or (namespaced and api_resource["namespaced"]):
+                    checkable_resources.append(kind)
 
-    return [r["kind"].lower() for r in get_api_resources() if _is_checkable(r["kind"])]
+    return tuple(checkable_resources)
 
 
 def _get_name_for_kind(kind):
@@ -400,11 +409,17 @@ def _check_status_for_restype(restype, json_data):
     if generation and status_generation and generation != status_generation:
         return False
 
-    if restype == "deploymentconfig" or restype == "deployment":
+    if restype in ("deploymentconfig", "deployment"):
         spec_replicas = json_data["spec"]["replicas"]
         available_replicas = status.get("availableReplicas", 0)
         updated_replicas = status.get("updatedReplicas", 0)
         if available_replicas == spec_replicas and updated_replicas == spec_replicas:
+            return True
+
+    elif restype in ("replicaset", "replicationcontroller"):
+        spec_replicas = json_data["spec"]["replicas"]
+        available_replicas = status.get("availableReplicas", 0)
+        if available_replicas == spec_replicas:
             return True
 
     elif restype == "statefulset":
@@ -604,15 +619,12 @@ class ResourceWaiter:
                 if not previously_ready and resource.ready:
                     log.info("[%s] owned resource %s is ready!", self.key, resource.key)
 
+    @property
+    def _all_resources_ready(self):
+        return all([r.ready is True for _, r in self.observed_resources.items()])
+
     def _observe(self, resource):
         key = resource.key
-
-        previously_ready = False
-        if key in self.observed_resources:
-            previous_resource = self.observed_resources[key]
-            if previous_resource.ready:
-                # so we don't keep logging on every loop
-                previously_ready = True
 
         # update our records for this resource
         self.observed_resources[key] = resource
@@ -630,7 +642,7 @@ class ResourceWaiter:
                 log.info("[%s] resource has disappeared, no longer monitoring it", key)
                 del self.observed_resources[key]
 
-        if not previously_ready and resource.ready:
+        if self._all_resources_ready:
             log.info("[%s] resource is ready!", key)
 
     def check_ready(self):
@@ -643,7 +655,7 @@ class ResourceWaiter:
 
         if data:
             self._observe(self.resource)
-            return all([r.ready is True for _, r in self.observed_resources.items()])
+            return self._all_resources_ready
         return False
 
     def _check_with_periodic_log(self):
@@ -699,9 +711,18 @@ class ResourceWaiter:
         return False
 
 
-def wait_for_ready(namespace, restype, name, timeout=600):
-    waiter = ResourceWaiter(namespace, restype, name)
-    return waiter.wait_for_ready(timeout)
+def wait_for_ready(namespace, restype, name, timeout=600, watch_owned=True):
+    if watch_owned:
+        watcher = ResourceWatcher(namespace)
+        watcher.start()
+    else:
+        watcher = None
+
+    try:
+        waiter = ResourceWaiter(namespace, restype, name, watch_owned=watch_owned, watcher=watcher)
+        return waiter.wait_for_ready(timeout)
+    finally:
+        watcher.stop()
 
 
 def wait_for_ready_threaded(waiters, timeout=600):
@@ -775,11 +796,11 @@ def on_k8s():
     return True
 
 
-def get_all_namespaces(label=None):
+def get_all_namespaces():
     if not on_k8s():
-        all_namespaces = get_json("project", label=label)["items"]
+        all_namespaces = get_json("project")["items"]
     else:
-        all_namespaces = get_json("namespace", label=label)["items"]
+        all_namespaces = get_json("namespace")["items"]
 
     return all_namespaces
 
