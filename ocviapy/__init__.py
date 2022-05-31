@@ -722,7 +722,8 @@ def wait_for_ready(namespace, restype, name, timeout=600, watch_owned=True):
         waiter = ResourceWaiter(namespace, restype, name, watch_owned=watch_owned, watcher=watcher)
         return waiter.wait_for_ready(timeout)
     finally:
-        watcher.stop()
+        if watcher:
+            watcher.stop()
 
 
 def wait_for_ready_threaded(waiters, timeout=600):
