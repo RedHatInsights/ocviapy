@@ -360,7 +360,7 @@ def available_checkable_resources(namespaced=False):
                 if not namespaced or (namespaced and api_resource["namespaced"]):
                     checkable_resources.append(kind)
 
-    return tuple(checkable_resources)
+    return checkable_resources
 
 
 def _get_name_for_kind(kind):
