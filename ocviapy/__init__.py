@@ -630,7 +630,8 @@ class ResourceWaiter:
         self.observed_resources[key] = resource
 
         if self.watch_owned:
-            for _, r in self.watcher.resources.items():
+            # use .copy() in case dict changes during iteration
+            for _, r in self.watcher.resources.copy().items():
                 self._check_owned_resources(r)
 
             # check to see if any of the owned resources we were previously watching are now no
@@ -797,11 +798,11 @@ def on_k8s():
     return True
 
 
-def get_all_namespaces():
+def get_all_namespaces(label=None):
     if not on_k8s():
-        all_namespaces = get_json("project")["items"]
+        all_namespaces = get_json("project", label=label)["items"]
     else:
-        all_namespaces = get_json("namespace")["items"]
+        all_namespaces = get_json("namespace", label=label)["items"]
 
     return all_namespaces
 
