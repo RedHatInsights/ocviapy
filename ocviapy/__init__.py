@@ -77,6 +77,9 @@ def parse_restype(string):
 
 
 def _only_immutable_errors(err_lines):
+    if not err_lines:
+        # this check is needed since all([]) returns 'True'
+        return False
     return all("field is immutable after creation" in line.lower() for line in err_lines)
 
 
@@ -621,7 +624,8 @@ class ResourceWaiter:
 
     @property
     def _all_resources_ready(self):
-        return all([r.ready is True for _, r in self.observed_resources.items()])
+        resources_ready = [r.ready is True for _, r in self.observed_resources.items()]
+        return len(resources_ready) > 0 and all(resources_ready)
 
     def _observe(self, resource):
         key = resource.key
@@ -832,7 +836,7 @@ def all_pods_running(namespace, label):
     statuses = []
     for pod in pod_data["items"]:
         statuses.append(_check_status_for_restype("pod", pod))
-    return len(statuses) and all(statuses)
+    return len(statuses) > 0 and all(statuses)
 
 
 def no_pods_running(namespace, label):
