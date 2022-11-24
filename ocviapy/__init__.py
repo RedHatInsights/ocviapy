@@ -811,6 +811,35 @@ def get_all_namespaces(label=None):
     return all_namespaces
 
 
+def get_current_namespace():
+    """Get current namespace/project"""
+    if not on_k8s():
+        return oc(shlex.split("project -q")).strip()
+
+    context_name = oc(shlex.split("config current-context")).strip()
+    if not context_name:
+        return None
+
+    context = oc(["config", "get-contexts", context_name])
+    if not context:
+        return None
+
+    context_lines = context.splitlines()
+    if len(context_lines) < 2:
+        return None
+
+    headers = context_lines[0].split()
+    try:
+        namespace_idx = headers.index("NAMESPACE")
+    except ValueError:
+        return None
+
+    try:
+        return context_lines[1].split()[namespace_idx]
+    except IndexError:
+        return None
+
+
 def any_pods_running(namespace, label):
     """
     Return true if any pods are running associated with provided label
