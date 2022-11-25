@@ -840,6 +840,15 @@ def get_current_namespace():
         return None
 
 
+def set_current_namespace(namespace):
+    """Sets a namespace on current context"""
+    if not on_k8s():
+        oc(["project", namespace])
+    else:
+        # set namespace on current context
+        oc(["config", "set-context", "--current", "--namespace", namespace])
+
+
 def any_pods_running(namespace, label):
     """
     Return true if any pods are running associated with provided label
