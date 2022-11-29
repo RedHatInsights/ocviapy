@@ -814,7 +814,10 @@ def get_all_namespaces(label=None):
 def get_current_namespace():
     """Get current namespace/project"""
     if not on_k8s():
-        return oc(shlex.split("project -q")).strip()
+        namespace = oc(shlex.split("project -q"), _ignore_errors=True)
+        if not namespace:
+            return None
+        return namespace.strip()
 
     context_name = oc(shlex.split("config current-context")).strip()
     if not context_name:
