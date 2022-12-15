@@ -814,16 +814,16 @@ def get_all_namespaces(label=None):
 def get_current_namespace():
     """Get current namespace/project"""
     if not on_k8s():
-        namespace = oc(shlex.split("project -q"), _ignore_errors=True)
+        namespace = oc("project", "-q", _ignore_errors=True)
         if not namespace:
             return None
         return namespace.strip()
 
-    context_name = oc(shlex.split("config current-context")).strip()
+    context_name = oc("config", "current-context").strip()
     if not context_name:
         return None
 
-    context = oc(["config", "get-contexts", context_name])
+    context = oc("config", "get-contexts", context_name)
     if not context:
         return None
 
@@ -846,10 +846,10 @@ def get_current_namespace():
 def set_current_namespace(namespace):
     """Sets a namespace on current context"""
     if not on_k8s():
-        oc(["project", namespace])
+        oc("project", namespace)
     else:
         # set namespace on current context
-        oc(["config", "set-context", "--current", "--namespace", namespace])
+        oc("config", "set-context", "--current", "--namespace", namespace)
 
 
 def any_pods_running(namespace, label):
