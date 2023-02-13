@@ -779,12 +779,15 @@ def copy_namespace_secrets(src_namespace, dst_namespace, secret_names, ignore_an
         )
 
 
-def process_template(template_data, params, local=True):
+def process_template(template_data, params, local=True, tty=False):
     valid_pnames = set(p["name"] for p in template_data.get("parameters", []))
     param_str = " ".join(f"-p {k}='{v}'" for k, v in params.items() if k in valid_pnames)
     local_str = str(local).lower()
 
     args = f"process --local={local_str} --ignore-unknown-parameters -o json -f - {param_str}"
+
+    if tty:
+        args += " --tty"
 
     output = oc(shlex.split(args), _silent=True, _in=json.dumps(template_data))
 
