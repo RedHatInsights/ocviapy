@@ -583,8 +583,8 @@ class ResourceWaiter:
         self.key = f"{self.restype}/{self.name}"
         self.resource = None
         self.timed_out = False
-        self._time_last_logged = None
-        self._time_remaining = None
+        self._time_last_logged = 0
+        self._time_remaining = 0
 
         if self.watch_owned and not self.watcher:
             raise ValueError("watcher must be specified if using watch_owned=True")
@@ -664,14 +664,16 @@ class ResourceWaiter:
         return False
 
     def _check_with_periodic_log(self):
+        current_time = time.time()
+
         if self.check_ready():
             return True
 
-        if time.time() > self._time_last_logged + 60:
+        if current_time > self._time_last_logged + 60:
             self._time_remaining -= 60
-            if self._time_remaining:
+            if self._time_remaining > 0:
                 log.info("[%s] waiting %dsec longer", self.key, self._time_remaining)
-                self._time_last_logged = time.time()
+                self._time_last_logged = current_time
         return False
 
     def wait_for_ready(self, timeout, reraise=False):
