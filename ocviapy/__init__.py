@@ -583,6 +583,7 @@ class ResourceWaiter:
         self.key = f"{self.restype}/{self.name}"
         self.resource = None
         self.timed_out = False
+        self._log_msg_interval = 60
         self._time_last_logged = 0
         self._time_remaining = 0
 
@@ -664,13 +665,14 @@ class ResourceWaiter:
         return False
 
     def _check_with_periodic_log(self):
-        current_time = time.time()
+        current_time = int(time.time())
 
         if self.check_ready():
             return True
 
-        if current_time > self._time_last_logged + 60:
-            self._time_remaining -= 60
+        # print a log message every every "log_msg_interval" sec while wait_for loop is running
+        if current_time > self._time_last_logged + self._log_msg_interval
+            self._time_remaining -= self._log_msg_interval
             if self._time_remaining > 0:
                 log.info("[%s] waiting %dsec longer", self.key, self._time_remaining)
                 self._time_last_logged = current_time
@@ -678,7 +680,7 @@ class ResourceWaiter:
 
     def wait_for_ready(self, timeout, reraise=False):
         self.timed_out = False
-        self._time_last_logged = time.time()
+        self._time_last_logged = int(time.time())
         self._time_remaining = timeout
 
         # we can loop with a much smaller delay if using a ResourceWatcher thread
