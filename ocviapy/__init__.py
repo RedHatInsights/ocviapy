@@ -670,8 +670,9 @@ class ResourceWaiter:
         if self.check_ready():
             return True
 
-        # print a log message every every "log_msg_interval" sec while wait_for loop is running
-        if current_time > self._time_last_logged + self._log_msg_interval
+        # print a log message every "log_msg_interval" sec while wait_for loop is running
+        time_to_print_next_log_msg = self._time_last_logged + self._log_msg_interval
+        if current_time >= time_to_print_next_log_msg:
             self._time_remaining -= self._log_msg_interval
             if self._time_remaining > 0:
                 log.info("[%s] waiting %dsec longer", self.key, self._time_remaining)
