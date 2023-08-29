@@ -438,6 +438,14 @@ def _check_status_for_restype(restype, json_data):
     elif restype == "pod":
         if status.get("phase").lower() == "running":
             return True
+        # if pod is in imagepullbackoff raise an exception
+        elif status.get("phase").lower() == "pending":
+            if status.get("containerStatuses"):
+                for container in status.get("containerStatuses"):
+                    if container.get("state", {}).get("waiting", {}).get("reason") == "ImagePullBackOff":
+                        raise StatusError(f"pod {json_data['metadata']['name']} is in ImagePullBackOff state")
+                    if container.get("state", {}).get("waiting", {}).get("reason") == "ErrImagePull":
+                        raise StatusError(f"pod {json_data['metadata']['name']} is in ErrImagePull state")
 
     elif restype in ("clowdenvironment", "clowdapp"):
         return _check_status_condition(
@@ -702,7 +710,10 @@ class ResourceWaiter:
                     timeout=timeout,
                 )
             return True
-        except (StatusError, ErrorReturnCode) as err:
+        except (StatusError) as err:
+            log.error("[%s] hit status error waiting for resource to be ready: %s", self.key, str(err))
+            raise err
+        except (ErrorReturnCode) as err:
             log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
             if reraise:
                 raise
