@@ -609,7 +609,7 @@ class ResourceWaiter:
             )
 
     def _check_owned_resources(self, resource):
-        if resource.image_pull_error:
+        if resource.kind == "pod" and resource.image_pull_error:
             raise StatusError(f"image pull error for resource {resource.key}/{resource.name}")
         for owner_ref in resource.data["metadata"].get("ownerReferences", []):
             restype_matches = owner_ref["kind"].lower() == self.restype
@@ -714,7 +714,10 @@ class ResourceWaiter:
                     timeout=timeout,
                 )
             return True
-        except (StatusError, ErrorReturnCode) as err:
+        except (StatusError) as err:
+            log.error("[%s] hit status error waiting for resource to be ready: %s", self.key, str(err))
+            raise
+        except (ErrorReturnCode) as err:
             log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
             if reraise:
                 raise
