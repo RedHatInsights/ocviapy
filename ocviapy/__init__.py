@@ -611,8 +611,6 @@ class ResourceWaiter:
             )
 
     def _check_owned_resources(self, resource):
-        if resource.image_pull_error:
-            raise StatusError(f"image pull error for resource {resource.key}/{resource.name}")
         for owner_ref in resource.data["metadata"].get("ownerReferences", []):
             restype_matches = owner_ref["kind"].lower() == self.restype
             owner_uid_matches = owner_ref["uid"] == self.resource.uid
@@ -651,9 +649,14 @@ class ResourceWaiter:
         # update our records for this resource
         self.observed_resources[key] = resource
 
+        if resource.image_pull_error:
+            raise StatusError(f"image pull error for resource {resource.key}/{resource.name}")
+
         if self.watch_owned:
             # use .copy() in case dict changes during iteration
             for _, r in self.watcher.resources.copy().items():
+                if r.image_pull_error:
+                    raise StatusError(f"image pull error for resource {r.key}/{r.name}")
                 self._check_owned_resources(r)
 
             # check to see if any of the owned resources we were previously watching are now no
