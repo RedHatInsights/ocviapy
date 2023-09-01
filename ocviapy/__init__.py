@@ -548,9 +548,8 @@ class Resource:
         status = self.data.get("status", {})
         if status.get("containerStatuses"):
             for container in status.get("containerStatuses"):
-                if container.get("state", {}).get("waiting", {}).get("reason") == "ImagePullBackOff":
-                    return True
-                if container.get("state", {}).get("waiting", {}).get("reason") == "ErrImagePull":
+                reason = container.get("state", {}).get("waiting", {}).get("reason", "")
+                if reason == "ImagePullBackOff" or reason == "ErrImagePull":
                     return True
         return False
 
