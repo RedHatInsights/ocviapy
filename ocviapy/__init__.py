@@ -557,6 +557,7 @@ class Resource:
                 reason = container.get("state", {}).get("waiting", {}).get("reason", "")
                 raise StatusError(f"Image Pull Failed: {self.name} {reason} {message} ")
 
+
 class ResourceWatcher(threading.Thread):
     def __init__(self, namespace, *args, **kwargs):
         super().__init__(*args, **kwargs)
