@@ -552,10 +552,10 @@ class Resource:
         for container in status.get("containerStatuses", []):
             reason = container.get("state", {}).get("waiting", {}).get("reason", "")
             if reason in ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
-                # Get the image tag so we can report it to the user
-                image = container.get("image")
-                err_text = f"{container['name']}: {reason} {image}"
-                raise StatusError(f"image pull error for resource {self.key}/{self.name}: {err_text}")
+                # get the state waiting message and reason
+                message = container.get("state", {}).get("waiting", {}).get("message", "")
+                reason = container.get("state", {}).get("waiting", {}).get("reason", "")
+                raise StatusError(f"Image Pull Failed: {self.name} {reason} {message} ")
 
 class ResourceWatcher(threading.Thread):
     def __init__(self, namespace, *args, **kwargs):
