@@ -547,7 +547,9 @@ class Resource:
         if self.restype != "pod":
             return
         status = self.data.get("status", {})
-        for container in status.get("containerStatuses", []):
+        container_statuses = status.get("initContainerStatuses", [])
+        container_statuses.extend(status.get("containerStatuses", []))
+        for container in container_statuses:
             reason = container.get("state", {}).get("waiting", {}).get("reason", "")
             if reason in ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
                 # get the state waiting message and reason
@@ -678,11 +680,9 @@ class ResourceWaiter:
             errors.add(str(err))
 
         if errors:
-            if len(errors) == 1:
-                msg = errors[0]
-                raise StatusError(msg)
             combined_msg = "\n".join([f"* {msg}" for msg in errors])
-            raise StatusError(f"Encountered resource errors:\n{combined_msg}")
+            log.error("Found image pull errors, details:\n%s", combined_msg)
+            raise StatusError("Found image pull errors, see error logs for details")
 
         if self._all_resources_ready:
             log.info("[%s] resource is ready!", key)
@@ -735,9 +735,6 @@ class ResourceWaiter:
                     timeout=timeout,
                 )
             return True
-        except StatusError as err:
-            log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
-            raise
         except ErrorReturnCode as err:
             log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
             if reraise:
