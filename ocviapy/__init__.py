@@ -438,14 +438,6 @@ def _check_status_for_restype(restype, json_data):
     elif restype == "pod":
         if status.get("phase").lower() == "running":
             return True
-        # if pod is in imagepullbackoff raise an exception
-        elif status.get("phase").lower() == "pending":
-            if status.get("containerStatuses"):
-                for container in status.get("containerStatuses"):
-                    if container.get("state", {}).get("waiting", {}).get("reason") == "ImagePullBackOff":
-                        raise StatusError(f"pod {json_data['metadata']['name']} is in ImagePullBackOff state")
-                    if container.get("state", {}).get("waiting", {}).get("reason") == "ErrImagePull":
-                        raise StatusError(f"pod {json_data['metadata']['name']} is in ErrImagePull state")
 
     elif restype in ("clowdenvironment", "clowdapp"):
         return _check_status_condition(
@@ -551,6 +543,17 @@ class Resource:
             )
         return detail_msg
 
+    @property
+    def image_pull_error(self):
+        status = self.data.get("status", {})
+        if status.get("containerStatuses"):
+            for container in status.get("containerStatuses"):
+                if container.get("state", {}).get("waiting", {}).get("reason") == "ImagePullBackOff":
+                    return True
+                if container.get("state", {}).get("waiting", {}).get("reason") == "ErrImagePull":
+                    return True
+        return False
+
 
 class ResourceWatcher(threading.Thread):
     def __init__(self, namespace, *args, **kwargs):
@@ -607,6 +610,8 @@ class ResourceWaiter:
             )
 
     def _check_owned_resources(self, resource):
+        if resource.image_pull_error:
+            raise StatusError(f"image pull error for resource {resource.key}/{resource.name}")
         for owner_ref in resource.data["metadata"].get("ownerReferences", []):
             restype_matches = owner_ref["kind"].lower() == self.restype
             owner_uid_matches = owner_ref["uid"] == self.resource.uid
@@ -710,10 +715,7 @@ class ResourceWaiter:
                     timeout=timeout,
                 )
             return True
-        except (StatusError) as err:
-            log.error("[%s] hit status error waiting for resource to be ready: %s", self.key, str(err))
-            raise err
-        except (ErrorReturnCode) as err:
+        except (StatusError, ErrorReturnCode) as err:
             log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
             if reraise:
                 raise
