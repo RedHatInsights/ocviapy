@@ -618,7 +618,7 @@ class ResourceWaiter:
         if self.status_errors:
             combined_msg = "\n".join([f"* {msg}" for msg in self.status_errors])
             log.error("Found resource status errors, details:\n%s", combined_msg)
-            raise StatusError("Found resource status errors, see error logs for details")
+            raise StatusError("Found resource status errors, see logs for details")
 
     def _owns_resource(self, resource):
         for owner_ref in resource.data["metadata"].get("ownerReferences", []):
@@ -791,6 +791,8 @@ def wait_for_ready_threaded(waiters, timeout=600):
         thread.name = thread.name.lower()
         thread.start()
         alive_waiters.append(waiter)
+        # don't keep starting more threads if one has already hit a status error
+        waiter.raise_if_status_errors()
 
     # similar to .join()'ing the threads, but bail early if any of them hit a status error
     while list(alive_waiters):
