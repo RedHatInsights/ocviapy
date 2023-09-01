@@ -601,6 +601,7 @@ class ResourceWaiter:
         self.key = f"{self.restype}/{self.name}"
         self.resource = None
         self.timed_out = False
+        self.status_errors = set()
         self._log_msg_interval = 60
         self._time_last_logged = 0
         self._time_remaining = 0
@@ -612,6 +613,12 @@ class ResourceWaiter:
             raise ValueError(
                 f"unable to check status of '{self.restype}' resources on this cluster"
             )
+
+    def raise_if_status_errors(self):
+        if self.status_errors:
+            combined_msg = "\n".join([f"* {msg}" for msg in self.status_errors])
+            log.error("Found resource status errors, details:\n%s", combined_msg)
+            raise StatusError("Found resource status errors, see error logs for details")
 
     def _owns_resource(self, resource):
         for owner_ref in resource.data["metadata"].get("ownerReferences", []):
@@ -671,18 +678,12 @@ class ResourceWaiter:
         # update our records for this resource
         self.observed_resources[key] = resource
 
-        errors = set()
         try:
             resource.raise_for_image_pull_error()
             if self.watch_owned:
                 self._check_owned_resources()
         except StatusError as err:
-            errors.add(str(err))
-
-        if errors:
-            combined_msg = "\n".join([f"* {msg}" for msg in errors])
-            log.error("Found image pull errors, details:\n%s", combined_msg)
-            raise StatusError("Found image pull errors, see error logs for details")
+            self.status_errors.add(str(err))
 
         if self._all_resources_ready:
             log.info("[%s] resource is ready!", key)
@@ -700,11 +701,14 @@ class ResourceWaiter:
             return self._all_resources_ready
         return False
 
-    def _check_with_periodic_log(self):
+    def _check_with_periodic_log(self, defer_status_error=False):
         current_time = int(time.time())
 
         if self.check_ready():
             return True
+
+        if not defer_status_error:
+            self.raise_if_status_errors()
 
         # print a log message every "log_msg_interval" sec while wait_for loop is running
         time_to_print_next_log_msg = self._time_last_logged + self._log_msg_interval
@@ -715,7 +719,7 @@ class ResourceWaiter:
                 self._time_last_logged = current_time
         return False
 
-    def wait_for_ready(self, timeout, reraise=False):
+    def wait_for_ready(self, timeout, reraise=False, defer_status_error=False):
         self.timed_out = False
         self._time_last_logged = int(time.time())
         self._time_remaining = timeout
@@ -730,6 +734,7 @@ class ResourceWaiter:
                 log.info("[%s] waiting up to %dsec for resource to be 'ready'", self.key, timeout)
                 wait_for(
                     self._check_with_periodic_log,
+                    func_args=(defer_status_error,),
                     message=f"wait for {self.key} to be 'ready'",
                     delay=delay,
                     timeout=timeout,
@@ -766,22 +771,30 @@ def wait_for_ready(namespace, restype, name, timeout=600, watch_owned=True):
 
     try:
         waiter = ResourceWaiter(namespace, restype, name, watch_owned=watch_owned, watcher=watcher)
-        return waiter.wait_for_ready(timeout)
+        return waiter.wait_for_ready(timeout, reraise=False, defer_status_error=False)
     finally:
         if watcher:
             watcher.stop()
 
 
 def wait_for_ready_threaded(waiters, timeout=600):
+    kwargs = {"timeout": timeout, "reraise": False, "defer_status_error": True}
     threads = [
-        threading.Thread(target=waiter.wait_for_ready, daemon=True, args=(timeout,))
+        threading.Thread(target=waiter.wait_for_ready, daemon=True, kwargs=kwargs)
         for waiter in waiters
     ]
     for thread in threads:
         thread.name = thread.name.lower()
         thread.start()
-    for thread in threads:
-        thread.join()
+
+    # similar to .join()'ing the threads, but need to bail early if any hit a status error
+    alive_threads = threads
+    while list(alive_threads):
+        for thread in threads:
+            thread.raise_if_status_errors()
+            if not thread.is_alive():
+                alive_threads.pop(thread)
+        time.sleep(0.1)
 
     timed_out_resources = [w.key for w in waiters if w.timed_out]
 
