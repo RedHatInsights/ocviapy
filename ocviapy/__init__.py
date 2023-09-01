@@ -543,20 +543,20 @@ class Resource:
             )
         return detail_msg
 
-    def raise_for_image_pull_error(self):
-        if self.restype != "pod":
-            return
-        status = self.data.get("status", {})
-        container_statuses = status.get("initContainerStatuses", [])
-        container_statuses.extend(status.get("containerStatuses", []))
-        for container in container_statuses:
-            reason = container.get("state", {}).get("waiting", {}).get("reason", "")
-            if reason in ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
-                # get the state waiting message and reason
-                name = container.get("name")
-                message = container.get("state", {}).get("waiting", {}).get("message", "")
+    @property
+    def image_pull_error(self):
+        if self.restype == "pod":
+            status = self.data.get("status", {})
+            container_statuses = status.get("initContainerStatuses", [])
+            container_statuses.extend(status.get("containerStatuses", []))
+            for container in container_statuses:
                 reason = container.get("state", {}).get("waiting", {}).get("reason", "")
-                raise StatusError(f"{reason} error for {self.key} (container {name}): {message}")
+                if reason in ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
+                    # get the state waiting message and reason
+                    name = container.get("name")
+                    message = container.get("state", {}).get("waiting", {}).get("message", "")
+                    reason = container.get("state", {}).get("waiting", {}).get("reason", "")
+                    return f"{reason} error for {self.key} (container {name}): {message}"
 
 
 class ResourceWatcher(threading.Thread):
@@ -658,10 +658,15 @@ class ResourceWaiter:
         resources_ready = [r.ready is True for _, r in self.observed_resources.items()]
         return len(resources_ready) > 0 and all(resources_ready)
 
+    def _check_for_status_errors(self, resource):
+        error = resource.image_pull_error
+        if error:
+            self.status_errors.add(error)
+
     def _check_owned_resources(self):
         # use .copy() in case dict changes during iteration
         for _, r in self.watcher.resources.copy().items():
-            r.raise_for_image_pull_error()
+            self._check_for_status_errors(r)
             self._check_status_if_owned(r)
 
         # check to see if any of the owned resources we were previously watching are now no
@@ -678,12 +683,8 @@ class ResourceWaiter:
         # update our records for this resource
         self.observed_resources[key] = resource
 
-        try:
-            resource.raise_for_image_pull_error()
-            if self.watch_owned:
-                self._check_owned_resources()
-        except StatusError as err:
-            self.status_errors.add(str(err))
+        self._check_for_status_errors(resource)
+        self._check_owned_resources()
 
         if self._all_resources_ready:
             log.info("[%s] resource is ready!", key)
