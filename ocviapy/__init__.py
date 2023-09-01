@@ -545,11 +545,13 @@ class Resource:
 
     @property
     def image_pull_error(self):
+        if self.restype != "pod":
+            return False
         status = self.data.get("status", {})
         if status.get("containerStatuses"):
-            for container in status.get("containerStatuses"):
+            for container in status.get("containerStatuses", []):
                 reason = container.get("state", {}).get("waiting", {}).get("reason", "")
-                if reason == "ImagePullBackOff" or reason == "ErrImagePull":
+                if reason in ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
                     return True
         return False
 
@@ -609,7 +611,7 @@ class ResourceWaiter:
             )
 
     def _check_owned_resources(self, resource):
-        if resource.kind == "pod" and resource.image_pull_error:
+        if resource.image_pull_error:
             raise StatusError(f"image pull error for resource {resource.key}/{resource.name}")
         for owner_ref in resource.data["metadata"].get("ownerReferences", []):
             restype_matches = owner_ref["kind"].lower() == self.restype
