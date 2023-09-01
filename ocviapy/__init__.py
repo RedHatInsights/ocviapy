@@ -543,18 +543,19 @@ class Resource:
             )
         return detail_msg
 
-    @property
-    def image_pull_error(self):
+    def handle_image_pull_error(self):
         if self.restype != "pod":
-            return False
+            return
         status = self.data.get("status", {})
-        if status.get("containerStatuses"):
-            for container in status.get("containerStatuses", []):
-                reason = container.get("state", {}).get("waiting", {}).get("reason", "")
-                if reason in ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
-                    return True
-        return False
-
+        if not status.get("containerStatuses"):
+            return
+        for container in status.get("containerStatuses", []):
+            reason = container.get("state", {}).get("waiting", {}).get("reason", "")
+            if reason in ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
+                # Get the image tag so we can report it to the user
+                image = container.get("image")
+                err_text = f"{container['name']}: {reason} {image}"
+                raise StatusError(f"image pull error for resource {self.key}/{self.name}: {err_text}")
 
 class ResourceWatcher(threading.Thread):
     def __init__(self, namespace, *args, **kwargs):
@@ -649,14 +650,12 @@ class ResourceWaiter:
         # update our records for this resource
         self.observed_resources[key] = resource
 
-        if resource.image_pull_error:
-            raise StatusError(f"image pull error for resource {resource.key}/{resource.name}")
+        resource.handle_image_pull_error()
 
         if self.watch_owned:
             # use .copy() in case dict changes during iteration
             for _, r in self.watcher.resources.copy().items():
-                if r.image_pull_error:
-                    raise StatusError(f"image pull error for resource {r.key}/{r.name}")
+                r.handle_image_pull_error()
                 self._check_owned_resources(r)
 
             # check to see if any of the owned resources we were previously watching are now no
