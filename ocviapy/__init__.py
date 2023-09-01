@@ -712,7 +712,7 @@ class ResourceWaiter:
                 )
             return True
         except (StatusError) as err:
-            log.error("[%s] hit status error waiting for resource to be ready: %s", self.key, str(err))
+            log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
             raise
         except (ErrorReturnCode) as err:
             log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
