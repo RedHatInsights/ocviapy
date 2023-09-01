@@ -684,7 +684,8 @@ class ResourceWaiter:
         self.observed_resources[key] = resource
 
         self._check_for_status_errors(resource)
-        self._check_owned_resources()
+        if self.watch_owned:
+            self._check_owned_resources()
 
         if self._all_resources_ready:
             log.info("[%s] resource is ready!", key)
