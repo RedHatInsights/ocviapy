@@ -779,21 +779,25 @@ def wait_for_ready(namespace, restype, name, timeout=600, watch_owned=True):
 
 def wait_for_ready_threaded(waiters, timeout=600):
     kwargs = {"timeout": timeout, "reraise": False, "defer_status_error": True}
-    threads = [
-        threading.Thread(target=waiter.wait_for_ready, daemon=True, kwargs=kwargs)
-        for waiter in waiters
-    ]
-    for thread in threads:
+    threads_for_waiter = {}
+    for waiter in waiters:
+        threads_for_waiter[waiter] = threading.Thread(
+            target=waiter.wait_for_ready, daemon=True, kwargs=kwargs
+        )
+
+    alive_waiters = []
+    for waiter, thread in threads_for_waiter.items():
         thread.name = thread.name.lower()
         thread.start()
+        alive_waiters.append(waiter)
 
-    # similar to .join()'ing the threads, but need to bail early if any hit a status error
-    alive_threads = threads
-    while list(alive_threads):
-        for thread in threads:
-            thread.raise_if_status_errors()
+    # similar to .join()'ing the threads, but bail early if any of them hit a status error
+    while list(alive_waiters):
+        for waiter in alive_waiters:
+            thread = threads_for_waiter[waiter]
+            waiter.raise_if_status_errors()
             if not thread.is_alive():
-                alive_threads.pop(thread)
+                alive_waiters.remove(waiter)
         time.sleep(0.1)
 
     timed_out_resources = [w.key for w in waiters if w.timed_out]
