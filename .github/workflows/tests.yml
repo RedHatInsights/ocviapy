@@ -4,12 +4,13 @@ on:
   push:
   pull_request:
     types: ["opened", "synchronize", "reopened"]
-
 jobs:
   flake8:
     name: flake8
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout to master
         uses: actions/checkout@v4
@@ -20,15 +21,11 @@ jobs:
           python-version: '3.x'
           architecture: 'x64'
 
-      - name: Install flake8
-        run: pip install flake8
-
-      - name: Run flake8
-        uses: suo/flake8-github-action@releases/v1
+      - name: flake8 Lint
+        uses: reviewdog/action-flake8@v3
         with:
-          checkName: 'flake8'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          filter_mode: nofilter
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   platform:
     name: 💻 Platform-${{ matrix.os }}
