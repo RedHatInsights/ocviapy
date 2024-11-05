@@ -785,6 +785,21 @@ def copy_namespace_secrets(src_namespace, dst_namespace, secret_names, ignore_an
 
 
 def process_template(template_data, params, local=True):
+    api_version = template_data.get("apiVersion")
+    kind = template_data.get("kind")
+
+    if not api_version:
+        raise ValueError("template data has no 'apiVersion' defined")
+    if not kind:
+        raise ValueError("template data has no 'kind' defined")
+    if str(kind).lower() != "template":
+        raise ValueError("template data 'kind' is not 'Template'")
+    if str(api_version).lower() == "v1":
+        # convert apiVersion since non-groupified resources are no longer supported
+        # in newer versions of the oc client (e.g. 4.17)
+        log.warning("converted template's deprecated apiVersion 'v1' to 'template.openshift.io/v1'")
+        template_data["apiVersion"] = "template.openshift.io/v1"
+
     valid_pnames = set(p["name"] for p in template_data.get("parameters", []))
     param_str = " ".join(f"-p {k}='{v}'" for k, v in params.items() if k in valid_pnames)
     local_str = str(local).lower()
