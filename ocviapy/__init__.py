@@ -543,6 +543,21 @@ class Resource:
             )
         return detail_msg
 
+    @property
+    def image_pull_error(self):
+        if self.restype == "pod":
+            status = self.data.get("status", {})
+            container_statuses = status.get("initContainerStatuses", [])
+            container_statuses.extend(status.get("containerStatuses", []))
+            for container in container_statuses:
+                reason = container.get("state", {}).get("waiting", {}).get("reason", "")
+                if reason in ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
+                    # get the state waiting message and reason
+                    name = container.get("name")
+                    message = container.get("state", {}).get("waiting", {}).get("message", "")
+                    reason = container.get("state", {}).get("waiting", {}).get("reason", "")
+                    return f"{reason} error for {self.key} (container {name}): {message}"
+
 
 class ResourceWatcher(threading.Thread):
     def __init__(self, namespace, *args, **kwargs):
@@ -583,6 +598,7 @@ class ResourceWaiter:
         self.key = f"{self.restype}/{self.name}"
         self.resource = None
         self.timed_out = False
+        self.status_errors = set()
         self._log_msg_interval = 60
         self._time_last_logged = 0
         self._time_remaining = 0
@@ -595,58 +611,78 @@ class ResourceWaiter:
                 f"unable to check status of '{self.restype}' resources on this cluster"
             )
 
-    def _check_owned_resources(self, resource):
+    def raise_if_status_errors(self):
+        if self.status_errors:
+            combined_msg = "\n".join([f"* {msg}" for msg in self.status_errors])
+            log.error("Found resource status errors, details:\n%s", combined_msg)
+            raise StatusError("Found resource status errors, see logs for details")
+
+    def _owns_resource(self, resource):
         for owner_ref in resource.data["metadata"].get("ownerReferences", []):
             restype_matches = owner_ref["kind"].lower() == self.restype
             owner_uid_matches = owner_ref["uid"] == self.resource.uid
             if restype_matches and owner_uid_matches:
                 # this resource is owned by "self"
-                previously_observed = False
-                previously_ready = False
-                if resource.key in self.observed_resources:
-                    # so we don't keep logging on every loop
-                    previously_observed = True
-                    previous_resource = self.observed_resources[resource.key]
-                    previously_ready = True if previous_resource.ready else False
+                return True
+        return False
 
-                # update our records for this resource
-                self.observed_resources[resource.key] = resource
+    def _check_status_if_owned(self, resource):
+        if self._owns_resource(resource):
+            previously_observed = False
+            previously_ready = False
+            if resource.key in self.observed_resources:
+                # so we don't keep logging on every loop
+                previously_observed = True
+                previous_resource = self.observed_resources[resource.key]
+                previously_ready = True if previous_resource.ready else False
 
-                if not previously_observed and not resource.ready:
-                    log.info(
-                        "[%s] found owned resource %s, not yet ready",
-                        self.key,
-                        resource.key,
-                    )
+            # update our records for this resource
+            self.observed_resources[resource.key] = resource
 
-                # check if ready state has transitioned for this resource
-                if not previously_ready and resource.ready:
-                    log.info("[%s] owned resource %s is ready!", self.key, resource.key)
+            if not previously_observed and not resource.ready:
+                log.info(
+                    "[%s] found owned resource %s, not yet ready",
+                    self.key,
+                    resource.key,
+                )
+
+            # check if ready state has transitioned for this resource
+            if not previously_ready and resource.ready:
+                log.info("[%s] owned resource %s is ready!", self.key, resource.key)
 
     @property
     def _all_resources_ready(self):
         resources_ready = [r.ready is True for _, r in self.observed_resources.items()]
         return len(resources_ready) > 0 and all(resources_ready)
 
+    def _check_for_status_errors(self, resource):
+        error = resource.image_pull_error
+        if error:
+            self.status_errors.add(error)
+
+    def _check_owned_resources(self):
+        # use .copy() in case dict changes during iteration
+        for _, r in self.watcher.resources.copy().items():
+            self._check_for_status_errors(r)
+            self._check_status_if_owned(r)
+
+        # check to see if any of the owned resources we were previously watching are now no
+        # longer present in the ResourceWatcher
+        disappeared_resources = {
+            key for key in self.observed_resources if key not in self.watcher.resources
+        }
+        for key in disappeared_resources:
+            log.info("[%s] resource has disappeared, no longer monitoring it", key)
+            del self.observed_resources[key]
+
     def _observe(self, resource):
         key = resource.key
-
         # update our records for this resource
         self.observed_resources[key] = resource
 
+        self._check_for_status_errors(resource)
         if self.watch_owned:
-            # use .copy() in case dict changes during iteration
-            for _, r in self.watcher.resources.copy().items():
-                self._check_owned_resources(r)
-
-            # check to see if any of the owned resources we were previously watching are now no
-            # longer present in the ResourceWatcher
-            disappeared_resources = {
-                key for key in self.observed_resources if key not in self.watcher.resources
-            }
-            for key in disappeared_resources:
-                log.info("[%s] resource has disappeared, no longer monitoring it", key)
-                del self.observed_resources[key]
+            self._check_owned_resources()
 
         if self._all_resources_ready:
             log.info("[%s] resource is ready!", key)
@@ -664,11 +700,14 @@ class ResourceWaiter:
             return self._all_resources_ready
         return False
 
-    def _check_with_periodic_log(self):
+    def _check_with_periodic_log(self, defer_status_error=False):
         current_time = int(time.time())
 
         if self.check_ready():
             return True
+
+        if not defer_status_error:
+            self.raise_if_status_errors()
 
         # print a log message every "log_msg_interval" sec while wait_for loop is running
         time_to_print_next_log_msg = self._time_last_logged + self._log_msg_interval
@@ -679,7 +718,7 @@ class ResourceWaiter:
                 self._time_last_logged = current_time
         return False
 
-    def wait_for_ready(self, timeout, reraise=False):
+    def wait_for_ready(self, timeout, reraise=False, defer_status_error=False):
         self.timed_out = False
         self._time_last_logged = int(time.time())
         self._time_remaining = timeout
@@ -694,12 +733,13 @@ class ResourceWaiter:
                 log.info("[%s] waiting up to %dsec for resource to be 'ready'", self.key, timeout)
                 wait_for(
                     self._check_with_periodic_log,
+                    func_args=(defer_status_error,),
                     message=f"wait for {self.key} to be 'ready'",
                     delay=delay,
                     timeout=timeout,
                 )
             return True
-        except (StatusError, ErrorReturnCode) as err:
+        except ErrorReturnCode as err:
             log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
             if reraise:
                 raise
@@ -730,22 +770,36 @@ def wait_for_ready(namespace, restype, name, timeout=600, watch_owned=True):
 
     try:
         waiter = ResourceWaiter(namespace, restype, name, watch_owned=watch_owned, watcher=watcher)
-        return waiter.wait_for_ready(timeout)
+        return waiter.wait_for_ready(timeout, reraise=False, defer_status_error=False)
     finally:
         if watcher:
             watcher.stop()
 
 
 def wait_for_ready_threaded(waiters, timeout=600):
-    threads = [
-        threading.Thread(target=waiter.wait_for_ready, daemon=True, args=(timeout,))
-        for waiter in waiters
-    ]
-    for thread in threads:
+    kwargs = {"timeout": timeout, "reraise": False, "defer_status_error": True}
+    threads_for_waiter = {}
+    for waiter in waiters:
+        threads_for_waiter[waiter] = threading.Thread(
+            target=waiter.wait_for_ready, daemon=True, kwargs=kwargs
+        )
+
+    alive_waiters = []
+    for waiter, thread in threads_for_waiter.items():
         thread.name = thread.name.lower()
         thread.start()
-    for thread in threads:
-        thread.join()
+        alive_waiters.append(waiter)
+        # don't keep starting more threads if one has already hit a status error
+        waiter.raise_if_status_errors()
+
+    # similar to .join()'ing the threads, but bail early if any of them hit a status error
+    while list(alive_waiters):
+        for waiter in alive_waiters:
+            thread = threads_for_waiter[waiter]
+            waiter.raise_if_status_errors()
+            if not thread.is_alive():
+                alive_waiters.remove(waiter)
+        time.sleep(0.1)
 
     timed_out_resources = [w.key for w in waiters if w.timed_out]
 
