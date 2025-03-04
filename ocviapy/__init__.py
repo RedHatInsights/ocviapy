@@ -801,7 +801,17 @@ def process_template(template_data, params, local=True):
         template_data["apiVersion"] = "template.openshift.io/v1"
 
     valid_pnames = set(p["name"] for p in template_data.get("parameters", []))
-    param_str = " ".join(f"-p {k}='{v}'" for k, v in params.items() if k in valid_pnames)
+
+    param_strs = []
+    for key, val in params.items():
+        if key not in valid_pnames:
+            continue
+        # prevent python bools from getting passed to templates as "True"/"False"
+        if isinstance(val, bool):
+            val = str(val).lower()
+        param_strs.append(f"-p {key}='{val}'")
+
+    param_str = " ".join(param_strs)
     local_str = str(local).lower()
 
     args = f"process --local={local_str} --ignore-unknown-parameters -o json -f - {param_str}"
