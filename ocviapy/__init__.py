@@ -806,6 +806,7 @@ def process_template(template_data, params, local=True):
     for key, val in params.items():
         if key not in valid_pnames:
             continue
+        # prevent python bools from getting passed to templates as "True"/"False"
         if isinstance(val, bool):
             val = str(val).lower()
         param_strs.append(f"-p {key}='{val}'")
