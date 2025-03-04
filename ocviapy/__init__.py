@@ -804,7 +804,6 @@ def process_template(template_data, params, local=True):
 
     param_strs = []
     for key, val in params.items():
-        print(key, val, type(val))
         if key not in valid_pnames:
             continue
         if isinstance(val, bool):
