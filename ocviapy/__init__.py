@@ -552,19 +552,22 @@ class ResourceWatcher(threading.Thread):
         self.resources = {}
         self._stopped = threading.Event()
 
+    def update_resources(self):
+        found_keys = []
+        for restype in available_checkable_resources():
+            response = get_json(restype, namespace=self.namespace)
+            for item in response.get("items", []):
+                r = Resource(data=item)
+                self.resources[r.key] = r
+                found_keys.append(r.key)
+        for key in list(self.resources.keys()):
+            if key not in found_keys:
+                del self.resources[key]
+
     def run(self):
         log.debug("starting resource watcher for namespace '%s'", self.namespace)
         while not self._stopped.is_set():
-            found_keys = []
-            for restype in available_checkable_resources():
-                response = get_json(restype, namespace=self.namespace)
-                for item in response.get("items", []):
-                    r = Resource(data=item)
-                    self.resources[r.key] = r
-                    found_keys.append(r.key)
-            for key in list(self.resources.keys()):
-                if key not in found_keys:
-                    del self.resources[key]
+            self.update_resources()
             time.sleep(5)
         log.debug("resource watcher stopped for namespace '%s'", self.namespace)
 
