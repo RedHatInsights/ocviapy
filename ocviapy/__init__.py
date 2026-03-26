@@ -345,6 +345,11 @@ _CHECKABLE_RESOURCES = (
     "kafkaconnect",
     "cyndipipeline",
     "xjoinpipeline",
+    # CAPI — Cluster API resources for ROSA HCP cluster provisioning
+    "cluster",
+    "rosacontrolplane",
+    "machinepool",
+    "rosamachinepool",
 )
 
 
@@ -463,6 +468,17 @@ def _check_status_for_restype(restype, json_data):
             _check_status_condition(status, "valid", "true")
             and status.get("activeIndexName") is not None
         )
+
+    elif restype in ("cluster", "rosacontrolplane"):
+        ready = _check_status_condition(status, "Ready", "true")
+        if restype == "rosacontrolplane":
+            return ready and _check_status_condition(status, "ROSAControlPlaneReady", "true")
+        return ready
+
+    elif restype in ("machinepool", "rosamachinepool"):
+        if restype == "rosamachinepool":
+            return _check_status_condition(status, "RosaMachinePoolReady", "true")
+        return _check_status_condition(status, "Ready", "true")
 
 
 class Resource:
