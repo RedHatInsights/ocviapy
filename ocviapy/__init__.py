@@ -67,8 +67,21 @@ def traverse_keys(d, keys, default=None):
 def parse_restype(string):
     """
     Given a resource type or its shortcut, return the full resource type name.
+
+    Supports fully-qualified resource types like 'clusters.cluster.x-k8s.io'
+    (i.e. <name>.<apigroup>) to disambiguate when multiple API groups define
+    the same resource name.
     """
     s = string.lower()
+
+    # check for fully-qualified format: <name>.<apigroup>
+    if "." in s:
+        for r in get_api_resources():
+            apigroup_no_version = r["apigroup"].split("/")[0]
+            qualified = f"{r['name']}.{apigroup_no_version}"
+            if s == qualified:
+                return qualified
+
     for r in get_api_resources():
         if s in r["shortnames"] or s == r["name"]:
             return r["name"]
