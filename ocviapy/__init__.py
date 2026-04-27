@@ -67,8 +67,21 @@ def traverse_keys(d, keys, default=None):
 def parse_restype(string):
     """
     Given a resource type or its shortcut, return the full resource type name.
+
+    Supports fully-qualified resource types like 'clusters.cluster.x-k8s.io'
+    (i.e. <name>.<apigroup>) to disambiguate when multiple API groups define
+    the same resource name.
     """
     s = string.lower()
+
+    # check for fully-qualified format: <name>.<apigroup>
+    if "." in s:
+        for r in get_api_resources():
+            apigroup_no_version = r["apigroup"].split("/")[0]
+            qualified = f"{r['name']}.{apigroup_no_version}"
+            if s == qualified:
+                return qualified
+
     for r in get_api_resources():
         if s in r["shortnames"] or s == r["name"]:
             return r["name"]
@@ -345,11 +358,12 @@ _CHECKABLE_RESOURCES = (
     "kafkaconnect",
     "cyndipipeline",
     "xjoinpipeline",
-    # CAPI — Cluster API resources for ROSA HCP cluster provisioning
-    "cluster",
+    # CAPI — Cluster API resources for ROSA HCP cluster provisioning (ordered lowest→highest)
+    "rosamachinepool",
+    "rosacluster",
     "rosacontrolplane",
     "machinepool",
-    "rosamachinepool",
+    "cluster",
 )
 
 
@@ -470,15 +484,22 @@ def _check_status_for_restype(restype, json_data):
         )
 
     elif restype in ("cluster", "rosacontrolplane"):
-        ready = _check_status_condition(status, "Ready", "true")
         if restype == "rosacontrolplane":
-            return ready and _check_status_condition(status, "ROSAControlPlaneReady", "true")
-        return ready
+            return _check_status_condition(status, "ROSAControlPlaneReady", "true")
+        return (
+            status.get("phase", "").lower() == "provisioned"
+            and _check_status_condition(status, "Available", "true")
+        )
+
+    elif restype == "rosacluster":
+        return status.get("ready") is True
 
     elif restype in ("machinepool", "rosamachinepool"):
         if restype == "rosamachinepool":
             return _check_status_condition(status, "RosaMachinePoolReady", "true")
-        return _check_status_condition(status, "Ready", "true")
+        # CAPI v1beta2 moved "Ready" to status.deprecated.v1beta1.conditions
+        v1beta1_status = status.get("deprecated", {}).get("v1beta1", {})
+        return _check_status_condition(v1beta1_status, "Ready", "true")
 
 
 class Resource:
