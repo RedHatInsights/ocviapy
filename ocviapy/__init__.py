@@ -337,13 +337,20 @@ class StatusError(Exception):
     pass
 
 
+class ResourceAccessError(Exception):
+    pass
+
+
 # Resources we are able to parse the status of
 #
 # In order for the 'ResourceWatcher' to collect resource info for underlying "owned" resources
 # correct, these types should be ordered according to where they fall on the "ownership chain."
 # For example, 'deployments' own 'replicasets' which own 'pods' -- so we want to list the resource
 # types from "lowest" to "highest" on the hierarchy here -- pod, replicaset, deployment
-_CHECKABLE_RESOURCES = (
+#
+# Mandatory types are standard k8s/OpenShift resources — missing 'list' access raises an error.
+# Optional types are CRDs that may not be present or accessible — missing access is silently skipped.
+_MANDATORY_CHECKABLE_RESOURCES = (
     "pod",
     "replicaset",
     "replicationcontroller",
@@ -351,6 +358,9 @@ _CHECKABLE_RESOURCES = (
     "deployment",
     "statefulset",
     "daemonset",
+)
+
+_OPTIONAL_CHECKABLE_RESOURCES = (
     "clowdapp",
     "clowdjobinvocation",
     "clowdenvironment",
@@ -366,13 +376,26 @@ _CHECKABLE_RESOURCES = (
     "cluster",
 )
 
+_CHECKABLE_RESOURCES = _MANDATORY_CHECKABLE_RESOURCES + _OPTIONAL_CHECKABLE_RESOURCES
+
 
 def _is_checkable(kind):
     return kind.lower() in _CHECKABLE_RESOURCES
 
 
+def _can_list_resource(kind):
+    """Return True if the current user has 'list' permission for this resource type."""
+    result = oc("auth", "can-i", "list", kind, _silent=True, _ignore_errors=True)
+    return result is not None and result.strip() == "yes"
+
+
+@functools.lru_cache(maxsize=None, typed=False)
 def available_checkable_resources(namespaced=False):
-    """Returns resources we are able to parse status of that are present on the cluster."""
+    """Returns resources we are able to parse status of that are present on the cluster.
+
+    Raises ResourceAccessError if the client lacks 'list' access for a mandatory resource type.
+    Optional resource types with missing access are silently excluded.
+    """
     checkable_resources = []
     api_resources = get_api_resources()
     for checkable_kind in _CHECKABLE_RESOURCES:
@@ -380,7 +403,19 @@ def available_checkable_resources(namespaced=False):
             kind = api_resource["kind"].lower()
             if kind == checkable_kind:
                 if not namespaced or (namespaced and api_resource["namespaced"]):
-                    checkable_resources.append(kind)
+                    if _can_list_resource(checkable_kind):
+                        checkable_resources.append(kind)
+                    elif checkable_kind in _MANDATORY_CHECKABLE_RESOURCES:
+                        raise ResourceAccessError(
+                            f"Client lacks 'list' permission for mandatory resource type"
+                            f" '{checkable_kind}'"
+                        )
+                    else:
+                        log.warning(
+                            "Client lacks 'list' permission for optional resource type '%s',"
+                            " skipping status checks for this resource type",
+                            checkable_kind,
+                        )
 
     return checkable_resources
 
