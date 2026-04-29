@@ -93,7 +93,9 @@ def _only_immutable_errors(err_lines):
     if not err_lines:
         # this check is needed since all([]) returns 'True'
         return False
-    return all("field is immutable after creation" in line.lower() for line in err_lines)
+    return all(
+        "field is immutable after creation" in line.lower() for line in err_lines
+    )
 
 
 def _conflicts_found(err_lines):
@@ -157,7 +159,9 @@ def _exec_oc(*args, **kwargs):
     last_err = None
 
     for count in range(1, retries + 1):
-        cmd = sh.oc(*args, **kwargs, _tee=True, _out=_out_line_handler, _err=_err_line_handler)
+        cmd = sh.oc(
+            *args, **kwargs, _tee=True, _out=_out_line_handler, _err=_err_line_handler
+        )
         if not _silent:
             cmd_args, cmd_kwargs = _get_logging_args(args, kwargs)
             log.info("running (pid %d): oc %s %s", cmd.pid, cmd_args, cmd_kwargs)
@@ -183,7 +187,9 @@ def _exec_oc(*args, **kwargs):
 
             last_err = err
             # Ignore warnings that are printed to stderr in our error analysis
-            err_lines = [line for line in err_lines if not line.lstrip().startswith("Warning:")]
+            err_lines = [
+                line for line in err_lines if not line.lstrip().startswith("Warning:")
+            ]
 
             # Check if these are errors we should handle
             if _ignore_immutable and _only_immutable_errors(err_lines):
@@ -337,13 +343,20 @@ class StatusError(Exception):
     pass
 
 
+class ResourceAccessError(Exception):
+    pass
+
+
 # Resources we are able to parse the status of
 #
 # In order for the 'ResourceWatcher' to collect resource info for underlying "owned" resources
 # correct, these types should be ordered according to where they fall on the "ownership chain."
 # For example, 'deployments' own 'replicasets' which own 'pods' -- so we want to list the resource
 # types from "lowest" to "highest" on the hierarchy here -- pod, replicaset, deployment
-_CHECKABLE_RESOURCES = (
+#
+# Mandatory types are standard k8s/OpenShift resources — missing 'list' access raises an error.
+# Optional types are CRDs that may not be present or accessible — missing access is silently skipped.
+_MANDATORY_CHECKABLE_RESOURCES = (
     "pod",
     "replicaset",
     "replicationcontroller",
@@ -351,6 +364,9 @@ _CHECKABLE_RESOURCES = (
     "deployment",
     "statefulset",
     "daemonset",
+)
+
+_OPTIONAL_CHECKABLE_RESOURCES = (
     "clowdapp",
     "clowdjobinvocation",
     "clowdenvironment",
@@ -366,13 +382,27 @@ _CHECKABLE_RESOURCES = (
     "cluster",
 )
 
+_CHECKABLE_RESOURCES = _MANDATORY_CHECKABLE_RESOURCES + _OPTIONAL_CHECKABLE_RESOURCES
+
 
 def _is_checkable(kind):
     return kind.lower() in _CHECKABLE_RESOURCES
 
 
+@functools.lru_cache(maxsize=None, typed=False)
+def _can_list_resource(kind):
+    """Return True if the current user has 'list' permission for this resource type."""
+    result = oc("auth", "can-i", "list", kind, _silent=True, _ignore_errors=True)
+    return result is not None and result.strip() == "yes"
+
+
+@functools.lru_cache(maxsize=None, typed=False)
 def available_checkable_resources(namespaced=False):
-    """Returns resources we are able to parse status of that are present on the cluster."""
+    """Returns resources we are able to parse status of that are present on the cluster.
+
+    Raises ResourceAccessError if the client lacks 'list' access for a mandatory resource type.
+    Optional resource types with missing access are silently excluded.
+    """
     checkable_resources = []
     api_resources = get_api_resources()
     for checkable_kind in _CHECKABLE_RESOURCES:
@@ -380,7 +410,16 @@ def available_checkable_resources(namespaced=False):
             kind = api_resource["kind"].lower()
             if kind == checkable_kind:
                 if not namespaced or (namespaced and api_resource["namespaced"]):
-                    checkable_resources.append(kind)
+                    if checkable_kind in _MANDATORY_CHECKABLE_RESOURCES:
+                        checkable_resources.append(kind)
+                    elif _can_list_resource(checkable_kind):
+                        checkable_resources.append(kind)
+                    else:
+                        log.warning(
+                            "Client lacks 'list' permission for optional resource type '%s',"
+                            " skipping status checks for this resource type",
+                            checkable_kind,
+                        )
 
     return checkable_resources
 
@@ -416,7 +455,9 @@ def _check_status_for_restype(restype, json_data):
     restype = parse_restype(restype)
 
     if restype != "pod" and restype not in _CHECKABLE_RESOURCES:
-        raise ValueError(f"Checking status for resource type {restype} currently not supported")
+        raise ValueError(
+            f"Checking status for resource type {restype} currently not supported"
+        )
 
     try:
         status = json_data["status"]
@@ -486,9 +527,10 @@ def _check_status_for_restype(restype, json_data):
     elif restype in ("cluster", "rosacontrolplane"):
         if restype == "rosacontrolplane":
             return _check_status_condition(status, "ROSAControlPlaneReady", "true")
-        return (
-            status.get("phase", "").lower() == "provisioned"
-            and _check_status_condition(status, "Available", "true")
+        return status.get(
+            "phase", ""
+        ).lower() == "provisioned" and _check_status_condition(
+            status, "Available", "true"
         )
 
     elif restype == "rosacluster":
@@ -593,9 +635,15 @@ class Resource:
                 if reason in ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull"):
                     # get the state waiting message and reason
                     name = container.get("name")
-                    message = container.get("state", {}).get("waiting", {}).get("message", "")
-                    reason = container.get("state", {}).get("waiting", {}).get("reason", "")
-                    return f"{reason} error for {self.key} (container '{name}'): {message}"
+                    message = (
+                        container.get("state", {}).get("waiting", {}).get("message", "")
+                    )
+                    reason = (
+                        container.get("state", {}).get("waiting", {}).get("reason", "")
+                    )
+                    return (
+                        f"{reason} error for {self.key} (container '{name}'): {message}"
+                    )
 
 
 class ResourceWatcher(threading.Thread):
@@ -773,7 +821,11 @@ class ResourceWaiter:
             # check for ready initially, only wait_for if we need to
             log.debug("[%s] checking if 'ready'", self.key)
             if not self.check_ready():
-                log.info("[%s] waiting up to %dsec for resource to be 'ready'", self.key, timeout)
+                log.info(
+                    "[%s] waiting up to %dsec for resource to be 'ready'",
+                    self.key,
+                    timeout,
+                )
                 wait_for(
                     self._check_with_periodic_log,
                     func_args=(defer_status_errors,),
@@ -783,7 +835,11 @@ class ResourceWaiter:
                 )
             return True
         except ErrorReturnCode as err:
-            log.error("[%s] hit error waiting for resource to be ready: %s", self.key, str(err))
+            log.error(
+                "[%s] hit error waiting for resource to be ready: %s",
+                self.key,
+                str(err),
+            )
             if reraise:
                 raise
         except (TimeoutException, TimedOutError, StatusError):
@@ -793,7 +849,9 @@ class ResourceWaiter:
                 # log a "bulleted list" of the not ready resources and their status conditions
                 msg = f"[{self.key}] timed out waiting for resource to be ready"
                 details = [
-                    f"  {r.details_str}" for _, r in self.observed_resources.items() if not r.ready
+                    f"  {r.details_str}"
+                    for _, r in self.observed_resources.items()
+                    if not r.ready
                 ]
                 if details:
                     msg += ", details: {}\n".format("\n".join(details))
@@ -814,7 +872,9 @@ def wait_for_ready(
         watcher = None
 
     try:
-        waiter = ResourceWaiter(namespace, restype, name, watch_owned=watch_owned, watcher=watcher)
+        waiter = ResourceWaiter(
+            namespace, restype, name, watch_owned=watch_owned, watcher=watcher
+        )
         return waiter.wait_for_ready(
             timeout, reraise=False, defer_status_errors=defer_status_errors
         )
@@ -824,7 +884,11 @@ def wait_for_ready(
 
 
 def wait_for_ready_threaded(waiters, timeout=600, defer_status_errors=True):
-    kwargs = {"timeout": timeout, "reraise": False, "defer_status_errors": defer_status_errors}
+    kwargs = {
+        "timeout": timeout,
+        "reraise": False,
+        "defer_status_errors": defer_status_errors,
+    }
     threads_for_waiter = {}
     for waiter in waiters:
         threads_for_waiter[waiter] = threading.Thread(
@@ -853,17 +917,23 @@ def wait_for_ready_threaded(waiters, timeout=600, defer_status_errors=True):
     timed_out_resources = [w.key for w in waiters if w.timed_out]
 
     if timed_out_resources:
-        log.info("some resources failed to become ready: %s", ", ".join(timed_out_resources))
+        log.info(
+            "some resources failed to become ready: %s", ", ".join(timed_out_resources)
+        )
         return False
 
     log.info("all resources being monitored reached 'ready' state")
     return True
 
 
-def copy_namespace_secrets(src_namespace, dst_namespace, secret_names, ignore_annotation_key):
+def copy_namespace_secrets(
+    src_namespace, dst_namespace, secret_names, ignore_annotation_key
+):
     for secret_name in secret_names:
         secret_data = export("secret", secret_name, namespace=src_namespace)
-        ignore = secret_data["metadata"].get("annotations", {}).get(ignore_annotation_key)
+        ignore = (
+            secret_data["metadata"].get("annotations", {}).get(ignore_annotation_key)
+        )
         if str(ignore).lower() == "true":
             log.debug(
                 "secret '%s' in namespace '%s' has bonfire.ignore==true, skipping",
@@ -900,7 +970,9 @@ def process_template(template_data, params, local=True):
     if str(api_version).lower() == "v1":
         # convert apiVersion since non-groupified resources are no longer supported
         # in newer versions of the oc client (e.g. 4.17)
-        log.warning("converted template's deprecated apiVersion 'v1' to 'template.openshift.io/v1'")
+        log.warning(
+            "converted template's deprecated apiVersion 'v1' to 'template.openshift.io/v1'"
+        )
         template_data["apiVersion"] = "template.openshift.io/v1"
 
     valid_pnames = set(p["name"] for p in template_data.get("parameters", []))
@@ -1027,7 +1099,9 @@ def _get_associated_pods_using_match_labels(namespace, restype, name):
 
     match_labels = traverse_keys(data, ["spec", "selector", "matchLabels"])
     if match_labels is None:
-        raise ValueError(f"resource {restype}/{name} has no 'matchLabels' selector specified")
+        raise ValueError(
+            f"resource {restype}/{name} has no 'matchLabels' selector specified"
+        )
 
     label_str = ",".join([f"{key}={val}" for key, val in match_labels.items()])
 
@@ -1057,7 +1131,9 @@ def _scale_down_up_using_match_labels(namespace, restype, name, timeout):
 
     match_labels = traverse_keys(data, ["spec", "selector", "matchLabels"])
     if match_labels is None:
-        raise ValueError(f"resource {restype}/{name} has no 'matchLabels' selector specified")
+        raise ValueError(
+            f"resource {restype}/{name} has no 'matchLabels' selector specified"
+        )
 
     label_str = ",".join([f"{key}={val}" for key, val in match_labels.items()])
 
