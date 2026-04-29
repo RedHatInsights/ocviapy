@@ -389,6 +389,7 @@ def _is_checkable(kind):
     return kind.lower() in _CHECKABLE_RESOURCES
 
 
+@functools.lru_cache(maxsize=None, typed=False)
 def _can_list_resource(kind):
     """Return True if the current user has 'list' permission for this resource type."""
     result = oc("auth", "can-i", "list", kind, _silent=True, _ignore_errors=True)
@@ -409,13 +410,10 @@ def available_checkable_resources(namespaced=False):
             kind = api_resource["kind"].lower()
             if kind == checkable_kind:
                 if not namespaced or (namespaced and api_resource["namespaced"]):
-                    if _can_list_resource(checkable_kind):
+                    if checkable_kind in _MANDATORY_CHECKABLE_RESOURCES:
                         checkable_resources.append(kind)
-                    elif checkable_kind in _MANDATORY_CHECKABLE_RESOURCES:
-                        raise ResourceAccessError(
-                            f"Client lacks 'list' permission for mandatory resource type"
-                            f" '{checkable_kind}'"
-                        )
+                    elif _can_list_resource(checkable_kind):
+                        checkable_resources.append(kind)
                     else:
                         log.warning(
                             "Client lacks 'list' permission for optional resource type '%s',"
